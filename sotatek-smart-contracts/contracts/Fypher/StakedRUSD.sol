@@ -34,7 +34,12 @@ contract StakedRUSD is
     // ── Constants ──
     uint256 public constant VESTING_PERIOD = 8 hours;
     uint256 public constant SETTING_MANAGER_TIMELOCK = 2 days;
-    uint256 private constant MIN_SHARES = 1;
+    // April-audit L-2 patch. The legacy `MIN_SHARES = 1` constant was
+    // declared here but never read by any function. The intended
+    // first-depositor inflation guard belongs in OZ ERC4626's
+    // `_decimalsOffset()` override (which we deliberately do NOT
+    // change in this contract — see the comment on {_decimalsOffset}
+    // below), so the dead constant has been removed.
 
     // ── Storage ──
     ISettingManagement public settingManagement;
@@ -484,5 +489,26 @@ contract StakedRUSD is
 
     function decimals() public view override(ERC20Upgradeable, ERC4626Upgradeable) returns (uint8) {
         return super.decimals();
+    }
+
+    /**
+     * @notice ERC-4626 virtual-share offset, intentionally left at the
+     *         OZ default of `0`.
+     *
+     * @dev April-audit L-2 patch (deferred). The first-depositor
+     *      inflation surface that an offset of e.g. `6` would close is
+     *      a *known* low-severity issue; flipping it after the vault
+     *      already has a non-zero `totalSupply` would dilute every
+     *      existing share by the offset factor (`10**offset`) on the
+     *      next conversion, which is operationally unsafe on a live
+     *      vault. The fix is to deploy a fresh implementation with
+     *      `_decimalsOffset() = 6` BEHIND a new proxy in the next
+     *      deployment cycle, then migrate stake out of this proxy via
+     *      cooldown/unstake. Keeping the override here as a documented
+     *      no-op so future contributors do not silently re-introduce
+     *      the change.
+     */
+    function _decimalsOffset() internal view virtual override returns (uint8) {
+        return 0;
     }
 }

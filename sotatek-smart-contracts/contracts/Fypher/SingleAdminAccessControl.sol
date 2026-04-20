@@ -10,16 +10,22 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
  */
 abstract contract SingleAdminAccessControl is Initializable {
     // ── Roles ──
+    // April-audit I-1 patch. Dropped six role constants
+    // (`WHITELISTED_STAKER_ROLE`, `RETAIL_ROLE`, `MINTER_ROLE`,
+    // `BURNER_ROLE`, `TRANSFER_FEE_ROLE`, `ADMIN_ROLE`) that were
+    // defined here but never checked anywhere in the protocol — they
+    // were dead governance surface that confused reviewers, and
+    // FYUSD/InstitutionalRUSD.mint enforces a single-`_minter` slot
+    // rather than `MINTER_ROLE`. The constants are pure compile-time
+    // values, so removing them does not shift any storage slot under
+    // TransparentProxy. External callers that previously read e.g.
+    // `MINTER_ROLE()` from this ABI must now compute the hash off-chain
+    // (`keccak256("MINTER_ROLE")`); since nothing on-chain consumes
+    // that role this is purely cosmetic.
     bytes32 public constant REWARDER_ROLE = keccak256("REWARDER_ROLE");
     bytes32 public constant SOFT_RESTRICTED_STAKER_ROLE = keccak256("SOFT_RESTRICTED_STAKER_ROLE");
     bytes32 public constant FULL_RESTRICTED_STAKER_ROLE = keccak256("FULL_RESTRICTED_STAKER_ROLE");
-    bytes32 public constant WHITELISTED_STAKER_ROLE = keccak256("WHITELISTED_STAKER_ROLE");
     bytes32 public constant INSTITUTIONAL_ROLE = keccak256("INSTITUTIONAL_ROLE");
-    bytes32 public constant RETAIL_ROLE = keccak256("RETAIL_ROLE");
-    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
-    bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
-    bytes32 public constant TRANSFER_FEE_ROLE = keccak256("TRANSFER_FEE_ROLE");
-    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant RELEASE_TOKEN_ROLE = keccak256("RELEASE_TOKEN_ROLE");
 
     // ── Storage ──
@@ -33,8 +39,7 @@ abstract contract SingleAdminAccessControl is Initializable {
      *      through the single `_admin` slot via the `onlyAdmin`
      *      modifier. This mapping is never written and
      *      {getRoleAdmin} always returns `bytes32(0)`. Kept in place
-     *      to preserve storage layout under TransparentProxy. April-
-     *      audit H-3 documentation patch.
+     *      to preserve storage layout under TransparentProxy.
      */
     mapping(bytes32 => bytes32) private _roleAdmin;
 
@@ -92,7 +97,7 @@ abstract contract SingleAdminAccessControl is Initializable {
 
     /**
      * @notice Renounce a role held by the caller.
-     * @dev April-audit H-3 patch. Critical operational roles
+     * @dev April-audit C-3 patch. Critical operational roles
      *      (REWARDER_ROLE, RELEASE_TOKEN_ROLE) and the default admin
      *      role (bytes32(0)) cannot be renounced — they must be
      *      revoked through the admin path, ensuring there is always a
@@ -113,18 +118,24 @@ abstract contract SingleAdminAccessControl is Initializable {
         emit RoleRevoked(role, account, msg.sender);
     }
 
+    /**
+     * @notice Convenience sweep that revokes every role this protocol
+     *         currently checks on-chain from `account`.
+     *
+     * @dev April-audit I-1 patch. Sweep narrowed to the roles still
+     *      referenced by other contracts (REWARDER, SOFT/FULL
+     *      RESTRICTED STAKER, INSTITUTIONAL, RELEASE_TOKEN). Any
+     *      legacy MINTER/BURNER/etc. role mapping entries written by
+     *      pre-patch admins remain in storage but are unreachable —
+     *      they were already inert because no contract reads them.
+     *      Operators wanting to re-clear them must call
+     *      {revokeRole} with the explicit hash.
+     */
     function revokeUserRole(address account) external onlyAdmin {
-        // Revoke all known roles
         _roles[REWARDER_ROLE][account] = false;
         _roles[SOFT_RESTRICTED_STAKER_ROLE][account] = false;
         _roles[FULL_RESTRICTED_STAKER_ROLE][account] = false;
-        _roles[WHITELISTED_STAKER_ROLE][account] = false;
         _roles[INSTITUTIONAL_ROLE][account] = false;
-        _roles[RETAIL_ROLE][account] = false;
-        _roles[MINTER_ROLE][account] = false;
-        _roles[BURNER_ROLE][account] = false;
-        _roles[TRANSFER_FEE_ROLE][account] = false;
-        _roles[ADMIN_ROLE][account] = false;
         _roles[RELEASE_TOKEN_ROLE][account] = false;
     }
 

@@ -366,6 +366,23 @@ contract FypherPerpsClearinghouse {
         _trackAccountMarket(account, marketId);
     }
 
+    /**
+     * @dev April-audit L-7 patch. Integer division in the naive
+     *      weighted-average truncates toward zero, which is *always*
+     *      in the trader's favor on a long add-in (lower entry →
+     *      larger unrealized PnL when price ≥ new entry) and against
+     *      the trader on a short add-in (lower entry → more negative
+     *      short PnL). Neither direction is exploitable — the bias is
+     *      bounded by one wei per unit size, ~0.01 % per trade at BTC
+     *      scale — but it is asymmetric, so we round in the direction
+     *      that is conservative for the protocol on each side:
+     *
+     *        long  → round UP (increase effective entry)
+     *        short → round DOWN (decrease effective entry)
+     *
+     *      Both choices shrink the trader's unrealized PnL by at most
+     *      one wei of price per unit of size.
+     */
     function _addToPosition(
         address account,
         bytes32 marketId,
@@ -378,9 +395,11 @@ contract FypherPerpsClearinghouse {
         uint256 newSizeE18 = existing.sizeE18 + sizeDeltaE18;
         require(newSizeE18 <= config.maxPositionSizeE18, "position too large");
 
-        uint256 newEntryPriceE18 = (
-            (existing.sizeE18 * existing.entryPriceE18) + (sizeDeltaE18 * executionPriceE18)
-        ) / newSizeE18;
+        uint256 numeratorE18 = (existing.sizeE18 * existing.entryPriceE18)
+            + (sizeDeltaE18 * executionPriceE18);
+        uint256 newEntryPriceE18 = existing.isLong
+            ? (numeratorE18 + newSizeE18 - 1) / newSizeE18
+            : numeratorE18 / newSizeE18;
         uint256 additionalMarginE18 = _requiredMargin(config, sizeDeltaE18, executionPriceE18, requestedLeverageE18);
 
         positions[account][marketId] = Position({

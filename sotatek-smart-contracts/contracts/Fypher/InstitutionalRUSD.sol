@@ -10,10 +10,16 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 /**
  * @title InstitutionalRUSD (iRUSD)
- * @notice Institutional-only RUSD token, gatekept by INSTITUTIONAL_ROLE
- *         from SettingManagement. Supports minting by MINTER_ROLE.
+ * @notice Institutional-only RUSD token. The companion StakedIRUSD
+ *         vault gatekeeps deposits via `INSTITUTIONAL_ROLE` from
+ *         SettingManagement; this token itself uses a single-`_minter`
+ *         slot (set by the owner) rather than `MINTER_ROLE`.
  *
- * @dev Deployed at: 0x37B48945Fb8b6607b5386d35b3472c12E8374dfb
+ * @dev Deployed at: 0x37B48945Fb8b6607b5386d35b3472c12E8374dfb.
+ *
+ *      April-audit L-6 patch: `initialize` now emits {Initialized}
+ *      and rejects the zero address. April-audit L-5 patch (companion):
+ *      `setMinter` emits {MinterUpdated}.
  */
 contract InstitutionalRUSD is
     Initializable,
@@ -24,6 +30,20 @@ contract InstitutionalRUSD is
     OwnableUpgradeable
 {
     address private _minter;
+
+    /// @notice Emitted exactly once when {initialize} sets the initial owner.
+    /// @dev April-audit L-6 patch. The OZ initializers fire low-level
+    ///      `OwnershipTransferred(0, owner_)` events, but they get lost
+    ///      among the four upgradeable extensions' init events. A
+    ///      single explicit signal makes the deploy block trivial to
+    ///      identify in off-chain audit trails (no need to grep across
+    ///      `OwnershipTransferred` on multiple proxies).
+    event Initialized(address indexed initialOwner);
+
+    /// @notice Emitted whenever the single-minter slot is reassigned.
+    /// @dev April-audit L-5 patch (companion to FYUSD). Same observability
+    ///      rationale as on FYUSD.setMinter.
+    event MinterUpdated(address indexed previousMinter, address indexed newMinter);
 
     error NotMinter();
     error ZeroAddress();
@@ -39,11 +59,13 @@ contract InstitutionalRUSD is
     }
 
     function initialize(address owner_) external initializer {
+        if (owner_ == address(0)) revert ZeroAddress();
         __ERC20_init("iRUSD", "iRUSD");
         __ERC20Burnable_init();
         __ERC20Pausable_init();
         __ERC20Permit_init("iRUSD");
         __Ownable_init(owner_);
+        emit Initialized(owner_);
     }
 
     function minter() external view returns (address) {
@@ -52,6 +74,7 @@ contract InstitutionalRUSD is
 
     function setMinter(address newMinter) external onlyOwner {
         if (newMinter == address(0)) revert ZeroAddress();
+        emit MinterUpdated(_minter, newMinter);
         _minter = newMinter;
     }
 
