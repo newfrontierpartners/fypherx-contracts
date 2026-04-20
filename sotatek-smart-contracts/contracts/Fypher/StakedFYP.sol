@@ -63,6 +63,7 @@ contract StakedFYP is
     error ZeroAddress();
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
+    error RestrictedStaker(address account);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -109,6 +110,22 @@ contract StakedFYP is
     }
 
     /**
+     * @notice Reject deposits to addresses flagged as restricted in
+     *         {settingManagement} (sanctions / compliance gating).
+     * @dev April-audit M-3 patch. The previous deposit path was
+     *      unrestricted; FYP shares could be minted to a sanctioned
+     *      address even though `StakedRUSD` already enforced the same
+     *      gate. Mirrors {StakedRUSD.notRestricted}.
+     */
+    modifier notRestricted(address account) {
+        if (settingManagement.hasRole(keccak256("FULL_RESTRICTED_STAKER_ROLE"), account))
+            revert RestrictedStaker(account);
+        if (settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), account))
+            revert RestrictedStaker(account);
+        _;
+    }
+
+    /**
      * @notice Total assets backing the vault for share-pricing purposes.
      *         Returns `balance(asset) - _unvestedAmount()` so the still-
      *         locked portion of a recently-distributed reward is excluded
@@ -133,9 +150,6 @@ contract StakedFYP is
     /**
      * @notice The portion of the latest reward cohort that is still
      *         locked (linear ramp from `vestingAmount` → 0 over 8h).
-     *
-     * @dev April-audit L-1 patch. Same naming/semantics as the
-     *      post-patch StakedRUSD helper.
      */
     function _unvestedAmount() internal view returns (uint256) {
         if (vestingAmount == 0) return 0;
@@ -146,7 +160,7 @@ contract StakedFYP is
     }
 
     function deposit(uint256 assets, address receiver)
-        public override nonReentrant whenNotPaused returns (uint256)
+        public override nonReentrant whenNotPaused notRestricted(receiver) returns (uint256)
     {
         if (assets == 0) revert ZeroAmount();
         uint256 shares = super.deposit(assets, receiver);
@@ -157,43 +171,66 @@ contract StakedFYP is
     function withdraw(uint256 assets, address receiver, address owner_)
         public override nonReentrant whenNotPaused returns (uint256)
     {
-        return super.withdraw(assets, receiver, owner_);
+        uint256 ret = super.withdraw(assets, receiver, owner_);
+        _debitUserStaked(owner_, assets);
+        return ret;
     }
 
     function redeem(uint256 shares, address receiver, address owner_)
         public override nonReentrant whenNotPaused returns (uint256)
     {
-        return super.redeem(shares, receiver, owner_);
+        uint256 assets = super.redeem(shares, receiver, owner_);
+        _debitUserStaked(owner_, assets);
+        return assets;
+    }
+
+    /**
+     * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
+     * @dev April-audit M-4 patch. See StakedRUSD._debitUserStaked.
+     */
+    function _debitUserStaked(address user, uint256 assets) internal {
+        uint256 staked = userStakedAmount[user];
+        userStakedAmount[user] = assets >= staked ? 0 : staked - assets;
     }
 
     // ── Cooldown ──
-    function cooldownAssets(uint256 assets) external override nonReentrant {
+    /**
+     * @notice See {StakedRUSD.cooldownAssets} for full rationale.
+     *         April-audit M-1 patch (accumulating bucket) and M-2 patch
+     *         ({whenNotPaused}) applied.
+     */
+    function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
         uint256 shares = previewWithdraw(assets);
         _withdraw(msg.sender, silo, msg.sender, assets, shares);
-
-        uint256 cd = settingManagement.getPoolConfigs("cooldownDuration");
-        cooldowns[msg.sender] = UserCooldown({
-            cooldownEnd: uint104(block.timestamp + cd),
-            underlyingAmount: uint152(assets)
-        });
-        emit CooldownStarted(msg.sender, assets, block.timestamp + cd);
+        _debitUserStaked(msg.sender, assets);
+        _accrueCooldown(msg.sender, assets);
     }
 
-    function cooldownShares(uint256 shares) external override nonReentrant {
+    function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
         uint256 assets = previewRedeem(shares);
         _withdraw(msg.sender, silo, msg.sender, assets, shares);
-
-        uint256 cd = settingManagement.getPoolConfigs("cooldownDuration");
-        cooldowns[msg.sender] = UserCooldown({
-            cooldownEnd: uint104(block.timestamp + cd),
-            underlyingAmount: uint152(assets)
-        });
-        emit CooldownStarted(msg.sender, assets, block.timestamp + cd);
+        _debitUserStaked(msg.sender, assets);
+        _accrueCooldown(msg.sender, assets);
     }
 
-    function unstake(address receiver) external override nonReentrant {
+    function _accrueCooldown(address user, uint256 assets) internal {
+        uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
+        uint256 newEnd = block.timestamp + cooldownDuration;
+
+        UserCooldown storage cd = cooldowns[user];
+        uint256 newAmount = uint256(cd.underlyingAmount) + assets;
+        require(newAmount <= type(uint152).max, "Cooldown overflow");
+        cd.underlyingAmount = uint152(newAmount);
+        if (newEnd > cd.cooldownEnd) {
+            require(newEnd <= type(uint104).max, "Cooldown end overflow");
+            cd.cooldownEnd = uint104(newEnd);
+        }
+        emit CooldownStarted(user, newAmount, cd.cooldownEnd);
+    }
+
+    function unstake(address receiver) external override nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
         if (block.timestamp < cd.cooldownEnd) revert CooldownNotFinished();
@@ -244,7 +281,7 @@ contract StakedFYP is
      *         only takes effect after `SETTING_MANAGER_TIMELOCK` has
      *         elapsed and {acceptSettingManager} is called.
      *
-     * @dev April-audit C-3 patch. See StakedRUSD.proposeSettingManager
+     * @dev April-audit H-3 patch. See StakedRUSD.proposeSettingManager
      *      for the full rationale (single-tx role-authority swap risk).
      */
     function proposeSettingManager(address newManager) external onlyAdmin {

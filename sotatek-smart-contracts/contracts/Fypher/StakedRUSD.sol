@@ -47,6 +47,13 @@ contract StakedRUSD is
 
     mapping(address => UserCooldown) public cooldowns;
     mapping(address => uint256) public userStakedAmount;
+    /**
+     * @dev Reserved-but-unused. April-audit L-3. The cooldown flow uses
+     *      `cooldowns` (UserCooldown struct) exclusively; no code path
+     *      reads or writes this mapping. Kept for TransparentProxy
+     *      storage-layout safety and so the slot is not accidentally
+     *      reused in a future upgrade.
+     */
     mapping(address => uint256) public unstakeRequests;
 
     // ── Storage (April-audit H-3 patch — APPEND-ONLY for proxy safety) ──
@@ -177,14 +184,14 @@ contract StakedRUSD is
      *         8-hour vesting period since the last `transferInRewards`
      *         has fully elapsed.
      *
-     * @dev April-audit L-1 patch. The function name now matches the body:
-     *      it returns *unvested* (still-locked) rewards, not vested ones.
-     *      The previous implementation delegated to
-     *      `PoolMath.calculateVestedAmount`, whose return value is the
-     *      *vested* (released) portion — the sign-flip was the C-1 root
-     *      cause. We compute the locked remainder inline so the helper
-     *      is self-explanatory and so the `PoolMath` library does not
-     *      need a paired `calculateUnvested` twin.
+     * @dev The function name now matches the body: it returns *unvested*
+     *      (still-locked) rewards, not vested ones. The previous
+     *      implementation delegated to `PoolMath.calculateVestedAmount`,
+     *      whose return value is the *vested* (released) portion — the
+     *      sign-flip was the C-1 root cause. We compute the locked
+     *      remainder inline so the helper is self-explanatory and so the
+     *      `PoolMath` library does not need a paired `calculateUnvested`
+     *      twin.
      */
     function _unvestedAmount() internal view returns (uint256) {
         if (vestingAmount == 0) return 0;
@@ -216,7 +223,9 @@ contract StakedRUSD is
         whenNotPaused
         returns (uint256)
     {
-        return super.withdraw(assets, receiver, owner_);
+        uint256 ret = super.withdraw(assets, receiver, owner_);
+        _debitUserStaked(owner_, assets);
+        return ret;
     }
 
     function redeem(uint256 shares, address receiver, address owner_)
@@ -226,39 +235,90 @@ contract StakedRUSD is
         whenNotPaused
         returns (uint256)
     {
-        return super.redeem(shares, receiver, owner_);
+        uint256 assets = super.redeem(shares, receiver, owner_);
+        _debitUserStaked(owner_, assets);
+        return assets;
+    }
+
+    /**
+     * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
+     *
+     * @dev April-audit M-4 patch. Previously {userStakedAmount} was
+     *      strictly monotonically increasing — every deposit added but
+     *      no withdraw subtracted. Off-chain dashboards that read it
+     *      as "currently staked principal" therefore over-stated
+     *      stake by the cumulative withdrawn amount. We clamp at 0
+     *      because reward accrual means a withdrawal can return more
+     *      assets than the user originally deposited; underflowing the
+     *      principal counter for the difference is wrong, so the
+     *      principal floor is 0.
+     */
+    function _debitUserStaked(address user, uint256 assets) internal {
+        uint256 staked = userStakedAmount[user];
+        userStakedAmount[user] = assets >= staked ? 0 : staked - assets;
     }
 
     // ── Cooldown ──
-    function cooldownAssets(uint256 assets) external override nonReentrant {
+    /**
+     * @notice Move `assets` worth of the caller's stake into the silo to
+     *         start the cooldown clock. Multiple calls accumulate into a
+     *         single cooldown bucket and EXTEND the cooldown end to the
+     *         later of (existing end, now + cooldownDuration).
+     *
+     * @dev April-audit M-1 patch. The previous shape OVERWROTE
+     *      `cooldowns[user]` on every call: a second {cooldownAssets}
+     *      replaced `underlyingAmount` with the new amount only, so the
+     *      previously-escrowed assets sat in the silo unrecoverable by
+     *      the user (they'd been removed from `balanceOf` already by
+     *      the first `_withdraw` and the cooldown record no longer
+     *      claimed them).
+     *
+     * @dev April-audit M-2 patch. Now respects {whenNotPaused} so the
+     *      admin can freeze cooldown intake during incident response,
+     *      consistent with {deposit}/{withdraw}/{redeem}.
+     */
+    function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
         uint256 shares = previewWithdraw(assets);
         _withdraw(msg.sender, address(silo), msg.sender, assets, shares);
+        _debitUserStaked(msg.sender, assets);
 
-        uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
-        cooldowns[msg.sender] = UserCooldown({
-            cooldownEnd: uint104(block.timestamp + cooldownDuration),
-            underlyingAmount: uint152(assets)
-        });
-
-        emit CooldownStarted(msg.sender, assets, block.timestamp + cooldownDuration);
+        _accrueCooldown(msg.sender, assets);
     }
 
-    function cooldownShares(uint256 shares) external override nonReentrant {
+    function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
         uint256 assets = previewRedeem(shares);
         _withdraw(msg.sender, address(silo), msg.sender, assets, shares);
+        _debitUserStaked(msg.sender, assets);
 
-        uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
-        cooldowns[msg.sender] = UserCooldown({
-            cooldownEnd: uint104(block.timestamp + cooldownDuration),
-            underlyingAmount: uint152(assets)
-        });
-
-        emit CooldownStarted(msg.sender, assets, block.timestamp + cooldownDuration);
+        _accrueCooldown(msg.sender, assets);
     }
 
-    function unstake(address receiver) external override nonReentrant {
+    /**
+     * @notice Internal accumulator for {cooldownAssets} / {cooldownShares}.
+     *         Adds `assets` to the user's outstanding cooldown bucket and
+     *         extends the cooldown end-timestamp to the later of (current
+     *         end, `now + cooldownDuration`).
+     */
+    function _accrueCooldown(address user, uint256 assets) internal {
+        uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
+        uint256 newEnd = block.timestamp + cooldownDuration;
+
+        UserCooldown storage cd = cooldowns[user];
+        uint256 newAmount = uint256(cd.underlyingAmount) + assets;
+        // uint152 holds ~5.7e45 — comfortably above any realistic 18-decimal
+        // stake balance. Defensive cast bound for L-4.
+        require(newAmount <= type(uint152).max, "Cooldown overflow");
+        cd.underlyingAmount = uint152(newAmount);
+        if (newEnd > cd.cooldownEnd) {
+            require(newEnd <= type(uint104).max, "Cooldown end overflow");
+            cd.cooldownEnd = uint104(newEnd);
+        }
+        emit CooldownStarted(user, newAmount, cd.cooldownEnd);
+    }
+
+    function unstake(address receiver) external override nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
         if (block.timestamp < cd.cooldownEnd) revert CooldownNotFinished();
@@ -270,7 +330,7 @@ contract StakedRUSD is
         emit Unstaked(msg.sender, receiver, assets);
     }
 
-    function earlyUnstake(address receiver) external nonReentrant {
+    function earlyUnstake(address receiver) external nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
 
@@ -367,7 +427,7 @@ contract StakedRUSD is
      *         only takes effect after `SETTING_MANAGER_TIMELOCK` has
      *         elapsed and {acceptSettingManager} is called.
      *
-     * @dev April-audit C-3 patch. The previous one-shot
+     * @dev April-audit H-3 patch. The previous one-shot
      *      `setSettingManager(addr)` allowed a compromised admin (or a
      *      single fat-fingered tx) to instantly swap the entire role
      *      authority of the vault — including the role authority that
