@@ -22,6 +22,21 @@ contract FYUSD is
 {
     address private _minter;
 
+    /// @notice Emitted whenever the single-minter slot is reassigned.
+    /// @dev April-audit L-5 patch. The companion RUSD token already
+    ///      emits an analogous event on rotation; FYUSD was the only
+    ///      sibling token without it, leaving a silent observability
+    ///      gap that off-chain monitors of "who can mint FYUSD" had no
+    ///      cheap signal for.
+    event MinterUpdated(address indexed previousMinter, address indexed newMinter);
+
+    /// @notice Emitted exactly once when {initialize} sets the initial owner.
+    /// @dev April-audit L-6 patch (companion to InstitutionalRUSD). Same
+    ///      audit-trail rationale: a dedicated single signal is cheaper
+    ///      to grep for than the OZ stack's `OwnershipTransferred(0, x)`
+    ///      pattern.
+    event Initialized(address indexed initialOwner);
+
     error NotMinter();
     error ZeroAddress();
 
@@ -36,10 +51,12 @@ contract FYUSD is
     }
 
     function initialize(address owner_) external initializer {
+        if (owner_ == address(0)) revert ZeroAddress();
         __ERC20_init("FYUSD", "FYUSD");
         __ERC20Burnable_init();
         __ERC20Permit_init("FYUSD");
         __Ownable_init(owner_);
+        emit Initialized(owner_);
     }
 
     function minter() external view returns (address) {
@@ -48,6 +65,7 @@ contract FYUSD is
 
     function setMinter(address newMinter) external onlyOwner {
         if (newMinter == address(0)) revert ZeroAddress();
+        emit MinterUpdated(_minter, newMinter);
         _minter = newMinter;
     }
 

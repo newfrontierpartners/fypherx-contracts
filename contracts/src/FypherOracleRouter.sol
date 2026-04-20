@@ -19,6 +19,20 @@ contract FypherOracleRouter {
     address public owner;
     mapping(bytes32 => OracleConfig) public marketOracles;
 
+    /**
+     * @notice Global emergency switch. When `true`, every {getPriceE18}
+     *         call reverts — every dependent contract (clearinghouse,
+     *         risk view aggregators) freezes by reverting on price
+     *         reads, with no per-market reconfiguration required.
+     *
+     * @dev April-audit M-10 patch. Previously a flapping or
+     *      manipulated feed could only be defused per-market
+     *      (`active = false`), requiring the operator to know the
+     *      full market list and process each one in a separate tx.
+     *      The global flag gives a single-tx kill-switch.
+     */
+    bool public paused;
+
     event OwnerUpdated(address indexed previousOwner, address indexed nextOwner);
     event MarketOracleConfigured(
         bytes32 indexed marketId,
@@ -27,6 +41,7 @@ contract FypherOracleRouter {
         uint32 maxStaleness,
         bool active
     );
+    event Paused(bool paused);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -42,6 +57,16 @@ contract FypherOracleRouter {
         require(nextOwner != address(0), "invalid owner");
         emit OwnerUpdated(owner, nextOwner);
         owner = nextOwner;
+    }
+
+    /**
+     * @notice Toggle the global pause. Emits {Paused} regardless of
+     *         whether the state actually changed (callers can use the
+     *         event as an explicit confirmation).
+     */
+    function setPaused(bool nextPaused) external onlyOwner {
+        paused = nextPaused;
+        emit Paused(nextPaused);
     }
 
     function configureMarketOracle(
@@ -65,6 +90,7 @@ contract FypherOracleRouter {
     }
 
     function getPriceE18(bytes32 marketId) external view returns (uint256) {
+        require(!paused, "oracle paused");
         OracleConfig memory config = marketOracles[marketId];
         require(config.active, "oracle inactive");
         require(config.feed != address(0), "oracle missing");

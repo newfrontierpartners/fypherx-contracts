@@ -4,10 +4,22 @@ pragma solidity ^0.8.20;
 interface IERC20Minimal {
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
 }
 
 interface IFypherOracleRouter {
     function getPriceE18(bytes32 marketId) external view returns (uint256);
+}
+
+/**
+ * @dev April-audit H-4 patch. Minimal interface to the insurance fund
+ *      vault so the clearinghouse can absorb liquidation deficits and
+ *      contribute surpluses on behalf of liquidated accounts.
+ */
+interface IFypherInsuranceFund {
+    function deposit(uint256 amount, bytes32 referenceId) external;
+    function withdraw(address to, uint256 amount, bytes32 referenceId) external;
+    function balance() external view returns (uint256);
 }
 
 contract FypherPerpsClearinghouse {
@@ -42,9 +54,17 @@ contract FypherPerpsClearinghouse {
     mapping(address => bytes32[]) private accountMarkets;
     mapping(address => mapping(bytes32 => bool)) private accountMarketSeen;
 
+    /// @notice April-audit H-4. The insurance fund is consulted on
+    ///         liquidation to absorb deficits (bad debt). When unset,
+    ///         a deficit-producing liquidation reverts rather than
+    ///         silently accruing negative collateral.
+    IFypherInsuranceFund public insuranceFund;
+
     event OwnerUpdated(address indexed previousOwner, address indexed nextOwner);
     event RelayerUpdated(address indexed relayer, bool allowed);
     event LiquidatorUpdated(address indexed liquidator, bool allowed);
+    event InsuranceFundUpdated(address indexed previousFund, address indexed nextFund);
+    event InsuranceFundDrawn(address indexed account, bytes32 indexed marketId, uint256 amountE18);
     event MarketConfigured(
         bytes32 indexed marketId,
         uint32 initialMarginBps,
@@ -104,6 +124,19 @@ contract FypherPerpsClearinghouse {
     function setLiquidator(address liquidator, bool allowed) external onlyOwner {
         liquidators[liquidator] = allowed;
         emit LiquidatorUpdated(liquidator, allowed);
+    }
+
+    /**
+     * @notice Set (or clear, by passing `address(0)`) the insurance
+     *         fund vault that absorbs liquidation deficits. The vault
+     *         must have this clearinghouse pre-authorised as an
+     *         operator (so {liquidate} can call its `withdraw`).
+     *
+     * @dev April-audit H-4 patch.
+     */
+    function setInsuranceFund(address nextFund) external onlyOwner {
+        emit InsuranceFundUpdated(address(insuranceFund), nextFund);
+        insuranceFund = IFypherInsuranceFund(nextFund);
     }
 
     function configureMarket(
@@ -201,6 +234,25 @@ contract FypherPerpsClearinghouse {
         emit TradeApplied(account, marketId, isLong, sizeDeltaE18, executionPriceE18, requestedLeverageE18);
     }
 
+    /**
+     * @notice Liquidate a single market position for an unhealthy account.
+     *         Realised PnL is applied to {collateralBalanceE18}; if the
+     *         result is negative (bad debt), the deficit is drawn from
+     *         the insurance fund and the account ledger is zeroed.
+     *
+     * @dev April-audit H-4 patch. Previously the function deleted the
+     *      position and credited PnL but left the account with negative
+     *      collateral on a deficit liquidation. That negative balance
+     *      polluted future {equity} / {isLiquidatable} calculations and
+     *      was effectively a free option for the user (continue trading
+     *      until equity climbed back to non-negative). Now:
+     *
+     *        - if `insuranceFund` is set and there is enough balance,
+     *          the deficit is pulled and the ledger is zeroed; or
+     *        - if no fund is set, or the fund is under-funded, the
+     *          liquidation REVERTS so the operator can route to a
+     *          backstop process rather than booking dead value.
+     */
     function liquidate(address account, bytes32 marketId) external onlyLiquidator {
         require(isLiquidatable(account), "account healthy");
 
@@ -211,6 +263,17 @@ contract FypherPerpsClearinghouse {
         int256 realizedPnlE18 = _calculateRealizedPnl(position, markPriceE18, position.sizeE18);
         collateralBalanceE18[account] += realizedPnlE18;
         delete positions[account][marketId];
+
+        int256 finalBalance = collateralBalanceE18[account];
+        if (finalBalance < 0) {
+            uint256 deficit = uint256(-finalBalance);
+            address fund = address(insuranceFund);
+            require(fund != address(0), "no insurance fund");
+            require(insuranceFund.balance() >= deficit, "insurance underfunded");
+            insuranceFund.withdraw(address(this), deficit, marketId);
+            collateralBalanceE18[account] = 0;
+            emit InsuranceFundDrawn(account, marketId, deficit);
+        }
 
         emit PositionLiquidated(account, marketId, markPriceE18, realizedPnlE18);
     }
@@ -303,6 +366,23 @@ contract FypherPerpsClearinghouse {
         _trackAccountMarket(account, marketId);
     }
 
+    /**
+     * @dev April-audit L-7 patch. Integer division in the naive
+     *      weighted-average truncates toward zero, which is *always*
+     *      in the trader's favor on a long add-in (lower entry →
+     *      larger unrealized PnL when price ≥ new entry) and against
+     *      the trader on a short add-in (lower entry → more negative
+     *      short PnL). Neither direction is exploitable — the bias is
+     *      bounded by one wei per unit size, ~0.01 % per trade at BTC
+     *      scale — but it is asymmetric, so we round in the direction
+     *      that is conservative for the protocol on each side:
+     *
+     *        long  → round UP (increase effective entry)
+     *        short → round DOWN (decrease effective entry)
+     *
+     *      Both choices shrink the trader's unrealized PnL by at most
+     *      one wei of price per unit of size.
+     */
     function _addToPosition(
         address account,
         bytes32 marketId,
@@ -315,8 +395,11 @@ contract FypherPerpsClearinghouse {
         uint256 newSizeE18 = existing.sizeE18 + sizeDeltaE18;
         require(newSizeE18 <= config.maxPositionSizeE18, "position too large");
 
-        uint256 newEntryPriceE18 =
-            ((existing.sizeE18 * existing.entryPriceE18) + (sizeDeltaE18 * executionPriceE18)) / newSizeE18;
+        uint256 numeratorE18 = (existing.sizeE18 * existing.entryPriceE18)
+            + (sizeDeltaE18 * executionPriceE18);
+        uint256 newEntryPriceE18 = existing.isLong
+            ? (numeratorE18 + newSizeE18 - 1) / newSizeE18
+            : numeratorE18 / newSizeE18;
         uint256 additionalMarginE18 = _requiredMargin(config, sizeDeltaE18, executionPriceE18, requestedLeverageE18);
 
         positions[account][marketId] = Position({

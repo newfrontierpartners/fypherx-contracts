@@ -29,6 +29,7 @@ contract StakedIRUSD is
     using SafeERC20 for IERC20;
 
     uint256 public constant VESTING_PERIOD = 8 hours;
+    uint256 public constant SETTING_MANAGER_TIMELOCK = 2 days;
 
     ISettingManagement public settingManagement;
     address public silo; // SIRUSDSilo — uses withdraw(token, to, amount)
@@ -40,12 +41,27 @@ contract StakedIRUSD is
 
     mapping(address => UserCooldown) public cooldowns;
     mapping(address => uint256) public userStakedAmount;
+    /**
+     * @dev Reserved-but-unused. April-audit L-3. The cooldown flow uses
+     *      `cooldowns` (UserCooldown struct) exclusively; no code path
+     *      reads or writes this mapping. Kept for TransparentProxy
+     *      storage-layout safety.
+     */
     mapping(address => uint256) public unstakeRequests;
+
+    // ── Storage (April-audit H-3 patch — APPEND-ONLY for proxy safety) ──
+    /// @notice Pending replacement for `settingManagement`, awaiting timelock.
+    ISettingManagement public pendingSettingManagement;
+    /// @notice UNIX timestamp at which the pending replacement may be accepted.
+    uint256 public pendingSettingManagerEta;
 
     event RewardsReceived(uint256 amount);
     event CooldownStarted(address indexed user, uint256 assets, uint256 cooldownEnd);
     event Unstaked(address indexed user, address indexed receiver, uint256 assets);
     event EarlyUnstaked(address indexed user, address indexed receiver, uint256 assets, uint256 fee);
+    event SettingManagerUpdated(address indexed newManager);
+    event SettingManagerProposed(address indexed newManager, uint256 eta);
+    event SettingManagerProposalCancelled(address indexed cancelledManager);
 
     error NotAdmin();
     error NotRewarder();
@@ -53,18 +69,30 @@ contract StakedIRUSD is
     error CooldownNotFinished();
     error NoCooldownStarted();
     error ZeroAmount();
+    error ZeroAddress();
     error RestrictedStaker(address account);
+    error TimelockNotElapsed(uint256 eta);
+    error NoPendingManager();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
+    /**
+     * @notice Initialize the upgradeable vault.
+     *
+     * @dev April-audit M-8 patch. See StakedFYP.initialize for rationale.
+     */
     function initialize(
         IERC20 _irusd,
         ISettingManagement _settingManagement,
         address _silo
     ) external initializer {
+        if (address(_irusd) == address(0)) revert ZeroAddress();
+        if (address(_settingManagement) == address(0)) revert ZeroAddress();
+        if (_silo == address(0)) revert ZeroAddress();
+
         __ERC4626_init(_irusd);
         __ERC20_init("Staked iRUSD", "siRUSD");
         __ERC20Pausable_init();
@@ -92,8 +120,31 @@ contract StakedIRUSD is
     }
 
     // ── ERC4626 ──
+    /**
+     * @notice Total assets backing the vault for share-pricing purposes.
+     *         Returns `balance(asset) - _unvestedAmount()` so the still-
+     *         locked portion of a recently-distributed reward is excluded
+     *         from the share price during its 8-hour linear vesting.
+     *
+     * @dev April-audit C-2 patch. See StakedRUSD for full rationale.
+     */
     function totalAssets() public view override returns (uint256) {
-        return IERC20(asset()).balanceOf(address(this));
+        uint256 bal = IERC20(asset()).balanceOf(address(this));
+        uint256 unvested = _unvestedAmount();
+        if (unvested >= bal) return 0;
+        return bal - unvested;
+    }
+
+    /**
+     * @notice The portion of the latest reward cohort that is still
+     *         locked (linear ramp from `vestingAmount` → 0 over 8h).
+     */
+    function _unvestedAmount() internal view returns (uint256) {
+        if (vestingAmount == 0) return 0;
+        uint256 endsAt = _lastDistributionTimestamp + VESTING_PERIOD;
+        if (block.timestamp >= endsAt) return 0;
+        uint256 remaining = endsAt - block.timestamp;
+        return (vestingAmount * remaining) / VESTING_PERIOD;
     }
 
     function deposit(uint256 assets, address receiver)
@@ -113,43 +164,65 @@ contract StakedIRUSD is
     function withdraw(uint256 assets, address receiver, address owner_)
         public override nonReentrant whenNotPaused returns (uint256)
     {
-        return super.withdraw(assets, receiver, owner_);
+        uint256 ret = super.withdraw(assets, receiver, owner_);
+        _debitUserStaked(owner_, assets);
+        return ret;
     }
 
     function redeem(uint256 shares, address receiver, address owner_)
         public override nonReentrant whenNotPaused returns (uint256)
     {
-        return super.redeem(shares, receiver, owner_);
+        uint256 assets = super.redeem(shares, receiver, owner_);
+        _debitUserStaked(owner_, assets);
+        return assets;
+    }
+
+    /**
+     * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
+     * @dev April-audit M-4 patch. See StakedRUSD._debitUserStaked.
+     */
+    function _debitUserStaked(address user, uint256 assets) internal {
+        uint256 staked = userStakedAmount[user];
+        userStakedAmount[user] = assets >= staked ? 0 : staked - assets;
     }
 
     // ── Cooldown ──
-    function cooldownAssets(uint256 assets) external override nonReentrant {
+    /**
+     * @notice See {StakedRUSD.cooldownAssets} for full rationale.
+     *         April-audit M-1/M-2 patches applied.
+     */
+    function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
         uint256 shares = previewWithdraw(assets);
         _withdraw(msg.sender, silo, msg.sender, assets, shares);
-
-        uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
-        cooldowns[msg.sender] = UserCooldown({
-            cooldownEnd: uint104(block.timestamp + cooldownDuration),
-            underlyingAmount: uint152(assets)
-        });
-        emit CooldownStarted(msg.sender, assets, block.timestamp + cooldownDuration);
+        _debitUserStaked(msg.sender, assets);
+        _accrueCooldown(msg.sender, assets);
     }
 
-    function cooldownShares(uint256 shares) external override nonReentrant {
+    function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
         uint256 assets = previewRedeem(shares);
         _withdraw(msg.sender, silo, msg.sender, assets, shares);
-
-        uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
-        cooldowns[msg.sender] = UserCooldown({
-            cooldownEnd: uint104(block.timestamp + cooldownDuration),
-            underlyingAmount: uint152(assets)
-        });
-        emit CooldownStarted(msg.sender, assets, block.timestamp + cooldownDuration);
+        _debitUserStaked(msg.sender, assets);
+        _accrueCooldown(msg.sender, assets);
     }
 
-    function unstake(address receiver) external override nonReentrant {
+    function _accrueCooldown(address user, uint256 assets) internal {
+        uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
+        uint256 newEnd = block.timestamp + cooldownDuration;
+
+        UserCooldown storage cd = cooldowns[user];
+        uint256 newAmount = uint256(cd.underlyingAmount) + assets;
+        require(newAmount <= type(uint152).max, "Cooldown overflow");
+        cd.underlyingAmount = uint152(newAmount);
+        if (newEnd > cd.cooldownEnd) {
+            require(newEnd <= type(uint104).max, "Cooldown end overflow");
+            cd.cooldownEnd = uint104(newEnd);
+        }
+        emit CooldownStarted(user, newAmount, cd.cooldownEnd);
+    }
+
+    function unstake(address receiver) external override nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
         if (block.timestamp < cd.cooldownEnd) revert CooldownNotFinished();
@@ -166,7 +239,7 @@ contract StakedIRUSD is
         emit Unstaked(msg.sender, receiver, assets);
     }
 
-    function earlyUnstake(address receiver) external nonReentrant {
+    function earlyUnstake(address receiver) external nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
 
@@ -191,10 +264,21 @@ contract StakedIRUSD is
     }
 
     // ── Rewards ──
+    /**
+     * @notice Transfer a new reward cohort into the vault. Carries any
+     *         still-unvested portion of the previous cohort into the new
+     *         one and re-anchors the vesting start.
+     *
+     * @dev April-audit C-2 patch. See StakedRUSD.transferInRewards for
+     *      the full rationale.
+     */
     function transferInRewards(uint256 amount) external onlyRewarder nonReentrant {
+        if (amount == 0) revert ZeroAmount();
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
-        vestingAmount += amount;
+
+        vestingAmount = _unvestedAmount() + amount;
         _lastDistributionTimestamp = block.timestamp;
+
         remainingRewards += amount;
         emit RewardsReceived(amount);
     }
@@ -208,8 +292,34 @@ contract StakedIRUSD is
     }
 
     // ── Admin ──
-    function setSettingManager(address newManager) external onlyAdmin {
-        settingManagement = ISettingManagement(newManager);
+    /**
+     * @notice Stage a replacement {ISettingManagement}. The new manager
+     *         only takes effect after `SETTING_MANAGER_TIMELOCK` has
+     *         elapsed and {acceptSettingManager} is called.
+     *
+     * @dev April-audit H-3 patch. See StakedRUSD.proposeSettingManager
+     *      for the full rationale.
+     */
+    function proposeSettingManager(address newManager) external onlyAdmin {
+        if (newManager == address(0)) {
+            address cancelled = address(pendingSettingManagement);
+            delete pendingSettingManagement;
+            delete pendingSettingManagerEta;
+            emit SettingManagerProposalCancelled(cancelled);
+            return;
+        }
+        pendingSettingManagement = ISettingManagement(newManager);
+        pendingSettingManagerEta = block.timestamp + SETTING_MANAGER_TIMELOCK;
+        emit SettingManagerProposed(newManager, pendingSettingManagerEta);
+    }
+
+    function acceptSettingManager() external onlyAdmin {
+        if (address(pendingSettingManagement) == address(0)) revert NoPendingManager();
+        if (block.timestamp < pendingSettingManagerEta) revert TimelockNotElapsed(pendingSettingManagerEta);
+        settingManagement = pendingSettingManagement;
+        delete pendingSettingManagement;
+        delete pendingSettingManagerEta;
+        emit SettingManagerUpdated(address(settingManagement));
     }
 
     function pause() external onlyAdmin { _pause(); }

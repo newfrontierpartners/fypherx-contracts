@@ -47,10 +47,37 @@ interface IRUSD {
  *             without ever transferring collateral. It is now permanently
  *             disabled (reverts `DeprecatedFunction`).
  *
- *      Storage layout is append-only: a single new mapping
- *      `pendingRedeems` is added at the end. All pre-existing slots
- *      (0..14) are untouched, so the existing TransparentProxy can be
- *      upgraded to this implementation without a storage collision.
+ *      Storage layout is append-only:
+ *        - slot 15: `pendingRedeems`                  (April P0)
+ *        - slot 16: `mintedPerAssetPerBlock`          (April-audit M-7)
+ *        - slot 17: `redeemedPerAssetPerBlock`        (April-audit M-7)
+ *      All pre-existing slots (0..14) are untouched, so the existing
+ *      TransparentProxy can be upgraded to this implementation without
+ *      a storage collision.
+ *
+ *      April-audit follow-up patches applied here (in addition to the
+ *      P0 set above):
+ *
+ *      ─ H-1: `requestRedeem` now BURNS the nonce in `_usedNonces`.
+ *             A user who cancels and re-requests must use a fresh
+ *             nonce; a stale executor signature can no longer be
+ *             executed against a re-funded escrow.
+ *
+ *      ─ M-5: `executeRedeem` now reverts (rather than silently
+ *             skipping the collateral payout) when
+ *             `collateral_asset` is not on the supported list. The
+ *             previous shape consumed the user's RUSD escrow without
+ *             paying out collateral, locking funds in the contract.
+ *
+ *      ─ M-6: `stablesDeltaLimit` is now actually enforced on both
+ *             `mint` and `executeRedeem` paths. Setting `0` preserves
+ *             the pre-patch behaviour (no enforcement).
+ *
+ *      ─ M-7: `maxMintPerBlock[asset]` and `maxRedeemPerBlock[asset]`
+ *             are now actually enforced via the new
+ *             `mintedPerAssetPerBlock` / `redeemedPerAssetPerBlock`
+ *             counters. Setting `0` preserves the pre-patch behaviour
+ *             (no per-asset enforcement).
  *
  *      ABI cutover required for the backend signer / SDK:
  *      - `hashOrder(Order)`            → use `hashOrder(Order, OrderType)`
@@ -129,6 +156,20 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
      */
     mapping(address => mapping(uint256 => uint256)) public pendingRedeems;   // slot 15
 
+    // ── Storage append (April-audit M-7 patch — APPEND-ONLY for proxy safety) ──
+    /**
+     * @notice Per-asset, per-block minted total. Backs the previously
+     *         dead-letter {maxMintPerBlock} mapping with actual
+     *         enforcement.
+     */
+    mapping(address => mapping(uint256 => uint256)) public mintedPerAssetPerBlock; // slot 16
+    /**
+     * @notice Per-asset, per-block redeemed total. Backs the previously
+     *         dead-letter {maxRedeemPerBlock} mapping with actual
+     *         enforcement.
+     */
+    mapping(address => mapping(uint256 => uint256)) public redeemedPerAssetPerBlock; // slot 17
+
     // ── Events ──
     event Mint(
         address indexed benefactor,
@@ -173,6 +214,9 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     error InvalidRoute();
     error RedeemNotFound();
     error DeprecatedFunction();
+    error AssetMaxMintExceeded(address asset); // April-audit M-7
+    error AssetMaxRedeemExceeded(address asset); // April-audit M-7
+    error AmountMismatch(); // April-audit H-1: order amount must match escrow
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -223,14 +267,17 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         if (order.collateral_amount == 0 || order.rusd_amount == 0) revert InvalidAmount();
         if (order.beneficiary == address(0)) revert ZeroAddress();
         if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
+        if (_usedNonces[order.benefactor][order.nonce]) revert InvalidNonce();
 
-        _verifyOrder(order, signature, OrderType.MINT);
-        _checkMintLimit(order.rusd_amount);
+        _verifyOrderSignature(order, signature, OrderType.MINT);
+        _checkMintLimit(order.collateral_asset, order.rusd_amount);
+        _checkStablesDelta(order.rusd_amount, 0);
 
         // C-4: route is validated inside (custodian whitelist + ratio sum).
         _distributeCollateral(order, route);
 
         mintedPerBlock[block.number] += order.rusd_amount;
+        mintedPerAssetPerBlock[order.collateral_asset][block.number] += order.rusd_amount;
         _usedNonces[order.benefactor][order.nonce] = true;
 
         // C-1: actually mint RUSD (this contract must hold MINTER_ROLE on RUSD).
@@ -264,35 +311,80 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
      * @notice User-initiated escrow of RUSD pending an executor decision.
      *         The (msg.sender, nonce) tuple keys the escrow record so a
      *         later {cancelRedeem} or {executeRedeem} can find it.
+     *
+     * @dev April-audit H-1 patch. The previous shape did NOT mark
+     *      `_usedNonces[msg.sender][nonce]`, which made the following
+     *      replay viable:
+     *
+     *        1. user calls requestRedeem(100, n=5) → escrow = 100
+     *        2. backend signs Order(redeem, n=5, amount=100)
+     *        3. user calls cancelRedeem(5)        → escrow = 0
+     *        4. user calls requestRedeem(100, 5)  → escrow = 100 again
+     *        5. executor calls executeRedeem with the *original* sig
+     *           — passes _verifyOrder (nonce still unused) and the
+     *           amount equality check (escrow == order.amount).
+     *
+     *      Burning the nonce at request time closes the window: any
+     *      retry must use a fresh nonce, regardless of whether the
+     *      original request was cancelled or executed. Defense-in-depth;
+     *      the executor's amount-equality check still protects the same
+     *      scenario, but a single-property invariant (`nonce burnt
+     *      ⇒ no replay`) is easier to reason about than a two-property
+     *      one.
      */
     function requestRedeem(uint256 rusdAmount, uint256 nonce) external nonReentrant whenMintRedeemEnabled {
         if (rusdAmount == 0) revert InvalidAmount();
         if (_usedNonces[msg.sender][nonce]) revert InvalidNonce();
         if (pendingRedeems[msg.sender][nonce] != 0) revert InvalidNonce();
+        _usedNonces[msg.sender][nonce] = true;
         pendingRedeems[msg.sender][nonce] = rusdAmount;
         rusd.safeTransferFrom(msg.sender, address(this), rusdAmount);
         emit RedeemRequested(msg.sender, rusdAmount, nonce);
     }
 
+    /**
+     * @notice Execute a previously-requested redeem. Authenticated by
+     *         (a) the executor account, (b) the backend EIP-712
+     *         signature, and (c) the on-chain {pendingRedeems} escrow
+     *         set by {requestRedeem}.
+     *
+     * @dev April-audit M-5 patch. The previous shape silently SKIPPED
+     *      the collateral payout when `collateral_asset` was not on
+     *      the supported list — but still deleted the escrow and
+     *      consumed the user's RUSD. Funds-loss bug. We now revert
+     *      hard, leaving the escrow intact so the user can
+     *      {cancelRedeem} (if the executor mis-routed) or wait for a
+     *      corrected execution.
+     *
+     * @dev April-audit H-1 patch. The nonce is already burnt at
+     *      request time, so this function authenticates against
+     *      {pendingRedeems} rather than {_usedNonces}. The
+     *      `escrowed != order.rusd_amount` check is retained as a
+     *      belt-and-braces guard against a backend that signs an
+     *      order with the wrong amount.
+     *
+     * @dev April-audit M-7 patch. Per-asset redeem cap is now enforced.
+     */
     function executeRedeem(
         Order calldata order,
         bytes calldata signature
     ) external onlyExecutor nonReentrant whenMintRedeemEnabled {
-        _verifyOrder(order, signature, OrderType.REDEEM);
-        _checkRedeemLimit(order.rusd_amount);
+        if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
 
-        // The executor cannot execute a redeem the user did not first
-        // request, and the order's rusd_amount must match the escrow.
+        _verifyOrderSignature(order, signature, OrderType.REDEEM);
+        _checkRedeemLimit(order.collateral_asset, order.rusd_amount);
+        _checkStablesDelta(0, order.rusd_amount);
+
         uint256 escrowed = pendingRedeems[order.benefactor][order.nonce];
-        if (escrowed == 0 || escrowed != order.rusd_amount) revert RedeemNotFound();
+        if (escrowed == 0) revert RedeemNotFound();
+        if (escrowed != order.rusd_amount) revert AmountMismatch();
         delete pendingRedeems[order.benefactor][order.nonce];
 
         redeemedPerBlock[block.number] += order.rusd_amount;
-        _usedNonces[order.benefactor][order.nonce] = true;
+        redeemedPerAssetPerBlock[order.collateral_asset][block.number] += order.rusd_amount;
+        // H-1: _usedNonces was already set in requestRedeem; do not double-set.
 
-        if (supportedAssets[order.collateral_asset]) {
-            IERC20(order.collateral_asset).safeTransfer(order.beneficiary, order.collateral_amount);
-        }
+        IERC20(order.collateral_asset).safeTransfer(order.beneficiary, order.collateral_amount);
 
         emit RedeemExecuted(order.benefactor, order.beneficiary, order.collateral_amount);
     }
@@ -343,26 +435,81 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         if (totalRatio != BPS_DENOMINATOR) revert InvalidRoute();
     }
 
-    function _verifyOrder(
+    /**
+     * @notice Verify the EIP-712 signature and expiry on an order. The
+     *         nonce check is intentionally NOT here — H-1 split the
+     *         nonce-reservation responsibility per call-site:
+     *
+     *         - {mint}                : reserves the nonce inline.
+     *         - {requestRedeem}       : reserves the nonce at request time
+     *                                   so a stale executor signature can
+     *                                   never be replayed against a
+     *                                   re-requested escrow (the "cancel
+     *                                   then re-request with same nonce"
+     *                                   replay window the previous code
+     *                                   left open).
+     *         - {executeRedeem}       : authenticates against
+     *                                   {pendingRedeems} instead of the
+     *                                   nonce mapping (the nonce is
+     *                                   already burnt by then).
+     */
+    function _verifyOrderSignature(
         Order calldata order,
         bytes calldata signature,
         OrderType orderType
     ) internal view {
         if (block.timestamp > order.expiry) revert ExpiredOrder();
-        if (_usedNonces[order.benefactor][order.nonce]) revert InvalidNonce();
-
         bytes32 structHash = _hashOrder(order, orderType);
         bytes32 d = _digestFromStruct(structHash);
         address recovered = d.recover(signature);
         if (recovered != backendSigner) revert InvalidSignature();
     }
 
-    function _checkMintLimit(uint256 amount) internal view {
+    /**
+     * @notice Enforce both the global and (April-audit M-7) the per-asset
+     *         per-block mint cap. A `maxMintPerBlock[asset]` of 0 means
+     *         "no per-asset cap" — global still applies.
+     */
+    function _checkMintLimit(address asset, uint256 amount) internal view {
         if (mintedPerBlock[block.number] + amount > globalMaxMintPerBlock) revert MaxMintExceeded();
+        uint256 perAsset = maxMintPerBlock[asset];
+        if (perAsset != 0) {
+            if (mintedPerAssetPerBlock[asset][block.number] + amount > perAsset)
+                revert AssetMaxMintExceeded(asset);
+        }
     }
 
-    function _checkRedeemLimit(uint256 amount) internal view {
+    /**
+     * @notice Enforce both the global and (April-audit M-7) the per-asset
+     *         per-block redeem cap. A `maxRedeemPerBlock[asset]` of 0
+     *         means "no per-asset cap" — global still applies.
+     */
+    function _checkRedeemLimit(address asset, uint256 amount) internal view {
         if (redeemedPerBlock[block.number] + amount > globalMaxRedeemPerBlock) revert MaxRedeemExceeded();
+        uint256 perAsset = maxRedeemPerBlock[asset];
+        if (perAsset != 0) {
+            if (redeemedPerAssetPerBlock[asset][block.number] + amount > perAsset)
+                revert AssetMaxRedeemExceeded(asset);
+        }
+    }
+
+    /**
+     * @notice Enforce the {stablesDeltaLimit} on the absolute net mint or
+     *         net redeem in the current block. April-audit M-6 patch — the
+     *         storage slot existed and was admin-settable but never read.
+     *         A value of 0 disables the check (preserves behaviour for any
+     *         vault that has not configured the limit on-chain).
+     *
+     * @param incomingMint   Amount being added to {mintedPerBlock} in this tx.
+     * @param incomingRedeem Amount being added to {redeemedPerBlock} in this tx.
+     */
+    function _checkStablesDelta(uint256 incomingMint, uint256 incomingRedeem) internal view {
+        uint256 cap = stablesDeltaLimit;
+        if (cap == 0) return;
+        uint256 minted = mintedPerBlock[block.number] + incomingMint;
+        uint256 redeemed = redeemedPerBlock[block.number] + incomingRedeem;
+        uint256 delta = minted >= redeemed ? minted - redeemed : redeemed - minted;
+        if (delta > cap) revert StablesDeltaExceeded();
     }
 
     function _hashOrder(Order calldata order, OrderType orderType) internal pure returns (bytes32) {
@@ -478,8 +625,19 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         return total == BPS_DENOMINATOR;
     }
 
+    /**
+     * @notice True iff a candidate mint of `amount` would pass both the
+     *         global per-block cap and (April-audit M-6) the
+     *         {stablesDeltaLimit} on absolute net mint per block.
+     */
     function verifyStablesLimit(uint256 amount) external view returns (bool) {
-        return mintedPerBlock[block.number] + amount <= globalMaxMintPerBlock;
+        if (mintedPerBlock[block.number] + amount > globalMaxMintPerBlock) return false;
+        uint256 cap = stablesDeltaLimit;
+        if (cap == 0) return true;
+        uint256 minted = mintedPerBlock[block.number] + amount;
+        uint256 redeemed = redeemedPerBlock[block.number];
+        uint256 delta = minted >= redeemed ? minted - redeemed : redeemed - minted;
+        return delta <= cap;
     }
 
     // ── Admin ──
@@ -535,6 +693,17 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         maxRedeemPerBlock[asset] = limit;
     }
 
+    /**
+     * @notice Cap the absolute net mint OR net redeem of RUSD allowed in
+     *         a single block. Setting `0` disables the check (the
+     *         pre-April-audit behaviour). The limit is denominated in
+     *         RUSD wei.
+     *
+     * @dev April-audit M-6 patch. Prior to this commit the storage slot
+     *      existed and was settable, but `_checkStablesDelta` did not
+     *      exist and no call site referenced it; the limit had zero
+     *      on-chain effect.
+     */
     function setStablesDeltaLimit(uint256 limit) external onlyAdmin {
         stablesDeltaLimit = limit;
     }
