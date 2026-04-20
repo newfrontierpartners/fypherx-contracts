@@ -82,8 +82,41 @@ contract StakedFYP is
         _;
     }
 
+    /**
+     * @notice Total assets backing the vault for share-pricing purposes.
+     *         Returns `balance(asset) - _unvestedAmount()` so the still-
+     *         locked portion of a recently-distributed reward is excluded
+     *         from the share price during its 8-hour linear vesting.
+     *
+     * @dev April-audit C-2 patch. The previous body returned `balance`
+     *      directly, which meant that `transferInRewards(amount)`
+     *      instantaneously bumped the share price by the full reward.
+     *      Anyone watching the rewarder's mempool tx could deposit
+     *      immediately before, then cooldown immediately after, and
+     *      capture the entire reward proportionally despite not having
+     *      been staked when the protocol earned it. The new shape
+     *      mirrors StakedRUSD post-C-1 and forces a linear release.
+     */
     function totalAssets() public view override returns (uint256) {
-        return IERC20(asset()).balanceOf(address(this));
+        uint256 bal = IERC20(asset()).balanceOf(address(this));
+        uint256 unvested = _unvestedAmount();
+        if (unvested >= bal) return 0;
+        return bal - unvested;
+    }
+
+    /**
+     * @notice The portion of the latest reward cohort that is still
+     *         locked (linear ramp from `vestingAmount` → 0 over 8h).
+     *
+     * @dev April-audit L-1 patch. Same naming/semantics as the
+     *      post-patch StakedRUSD helper.
+     */
+    function _unvestedAmount() internal view returns (uint256) {
+        if (vestingAmount == 0) return 0;
+        uint256 endsAt = _lastDistributionTimestamp + VESTING_PERIOD;
+        if (block.timestamp >= endsAt) return 0;
+        uint256 remaining = endsAt - block.timestamp;
+        return (vestingAmount * remaining) / VESTING_PERIOD;
     }
 
     function deposit(uint256 assets, address receiver)
@@ -152,10 +185,21 @@ contract StakedFYP is
     }
 
     // ── Rewards ──
+    /**
+     * @notice Transfer a new reward cohort into the vault. Carries any
+     *         still-unvested portion of the previous cohort into the new
+     *         one and re-anchors the vesting start.
+     *
+     * @dev April-audit C-2 patch. See StakedRUSD.transferInRewards for
+     *      the full rationale.
+     */
     function transferInRewards(uint256 amount) external onlyRewarder nonReentrant {
+        if (amount == 0) revert ZeroAmount();
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
-        vestingAmount += amount;
+
+        vestingAmount = _unvestedAmount() + amount;
         _lastDistributionTimestamp = block.timestamp;
+
         remainingRewards += amount;
         emit RewardsReceived(amount);
     }

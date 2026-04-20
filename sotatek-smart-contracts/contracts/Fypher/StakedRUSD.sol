@@ -106,17 +106,55 @@ contract StakedRUSD is
     }
 
     // ── ERC4626 overrides ──
+    /**
+     * @notice Total assets backing the vault for share-pricing purposes.
+     *         Returns `balance(asset) - _unvestedAmount()` so the still-
+     *         locked portion of a recently-distributed reward is excluded
+     *         from the share price during its 8-hour linear vesting.
+     *
+     * @dev April-audit C-1 patch. The previous shape was
+     *      `balance + calculateVestedAmount(...)` which (a) double-counted
+     *      the just-transferred reward (it is already in `balance`) and
+     *      (b) inverted the math direction. The Ethena sUSDe pattern is
+     *      `balance - locked-portion`. The pre-patch version monotonically
+     *      over-stated totalAssets by the cumulative `vestingAmount`,
+     *      eventually breaking redeem solvency once the vault was asked
+     *      to pay out more than it physically held.
+     *
+     *      The `unvested >= bal` guard is defensive: legacy on-chain state
+     *      from the pre-patch implementation may carry an oversized
+     *      `vestingAmount`. We saturate at 0 instead of underflowing a
+     *      public view; the value heals naturally as `block.timestamp`
+     *      moves past `_lastDistributionTimestamp + VESTING_PERIOD`.
+     */
     function totalAssets() public view override returns (uint256) {
-        return IERC20(asset()).balanceOf(address(this)) + _unvestedAmount();
+        uint256 bal = IERC20(asset()).balanceOf(address(this));
+        uint256 unvested = _unvestedAmount();
+        if (unvested >= bal) return 0;
+        return bal - unvested;
     }
 
+    /**
+     * @notice The portion of the latest reward cohort that is still locked
+     *         (i.e. has not yet linearly vested). Returns 0 once the
+     *         8-hour vesting period since the last `transferInRewards`
+     *         has fully elapsed.
+     *
+     * @dev April-audit L-1 patch. The function name now matches the body:
+     *      it returns *unvested* (still-locked) rewards, not vested ones.
+     *      The previous implementation delegated to
+     *      `PoolMath.calculateVestedAmount`, whose return value is the
+     *      *vested* (released) portion — the sign-flip was the C-1 root
+     *      cause. We compute the locked remainder inline so the helper
+     *      is self-explanatory and so the `PoolMath` library does not
+     *      need a paired `calculateUnvested` twin.
+     */
     function _unvestedAmount() internal view returns (uint256) {
         if (vestingAmount == 0) return 0;
-        return PoolMath.calculateVestedAmount(
-            vestingAmount,
-            _lastDistributionTimestamp,
-            VESTING_PERIOD
-        );
+        uint256 endsAt = _lastDistributionTimestamp + VESTING_PERIOD;
+        if (block.timestamp >= endsAt) return 0;
+        uint256 remaining = endsAt - block.timestamp;
+        return (vestingAmount * remaining) / VESTING_PERIOD;
     }
 
     // ── Deposit / Withdraw ──
@@ -213,10 +251,32 @@ contract StakedRUSD is
     }
 
     // ── Rewards ──
+    /**
+     * @notice Transfer a new reward cohort into the vault. The caller
+     *         must hold REWARDER_ROLE in SettingManagement.
+     *
+     * @dev April-audit C-1 patch. The previous shape did `vestingAmount +=
+     *      amount` which (combined with the inverted `totalAssets` math)
+     *      caused the share price to over-state by the running total of
+     *      every distribution. Now we roll the still-unvested portion of
+     *      the previous cohort into the new one and re-anchor the vesting
+     *      start, so:
+     *
+     *        - locked rewards are never lost across distributions, and
+     *        - `vestingAmount` always equals "the lock balance currently
+     *           being unlocked from `_lastDistributionTimestamp`."
+     *
+     *      Combined with the new `totalAssets = balance - _unvestedAmount`
+     *      shape, this makes share-price progression strictly monotone in
+     *      the absence of withdrawals.
+     */
     function transferInRewards(uint256 amount) external onlyRewarder nonReentrant {
+        if (amount == 0) revert ZeroAmount();
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), amount);
-        vestingAmount += amount;
+
+        vestingAmount = _unvestedAmount() + amount;
         _lastDistributionTimestamp = block.timestamp;
+
         remainingRewards += amount;
         emit RewardsReceived(amount);
     }
