@@ -32,6 +32,7 @@ contract StakedAUSD is
     using SafeERC20 for IERC20;
 
     uint256 public constant VESTING_PERIOD = 8 hours;
+    uint256 public constant SETTING_MANAGER_TIMELOCK = 2 days;
 
     ISettingManagement public settingManagement;
     address public silo;
@@ -44,26 +45,48 @@ contract StakedAUSD is
     mapping(address => UserCooldown) public cooldowns;
     mapping(address => uint256) public userStakedAmount;
 
+    // ── Storage (April-audit H-3 patch — APPEND-ONLY for proxy safety) ──
+    /// @notice Pending replacement for `settingManagement`, awaiting timelock.
+    ISettingManagement public pendingSettingManagement;
+    /// @notice UNIX timestamp at which the pending replacement may be accepted.
+    uint256 public pendingSettingManagerEta;
+
     event RewardsReceived(uint256 amount);
     event CooldownStarted(address indexed user, uint256 assets, uint256 cooldownEnd);
     event Unstaked(address indexed user, address indexed receiver, uint256 assets);
+    event SettingManagerUpdated(address indexed newManager);
+    event SettingManagerProposed(address indexed newManager, uint256 eta);
+    event SettingManagerProposalCancelled(address indexed cancelledManager);
 
     error NotAdmin();
     error NotRewarder();
     error CooldownNotFinished();
     error NoCooldownStarted();
     error ZeroAmount();
+    error ZeroAddress();
+    error TimelockNotElapsed(uint256 eta);
+    error NoPendingManager();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
 
+    /**
+     * @notice Initialize the upgradeable vault.
+     *
+     * @dev April-audit M-8 patch. See StakedFYP.initialize for the
+     *      same zero-address rationale.
+     */
     function initialize(
         IERC20 _fyusd,
         ISettingManagement _settingManagement,
         address _silo
     ) external initializer {
+        if (address(_fyusd) == address(0)) revert ZeroAddress();
+        if (address(_settingManagement) == address(0)) revert ZeroAddress();
+        if (_silo == address(0)) revert ZeroAddress();
+
         __ERC4626_init(_fyusd);
         __ERC20_init("Staked AUSD", "stAUSD");
         __ERC20Pausable_init();
@@ -210,8 +233,34 @@ contract StakedAUSD is
     }
 
     // ── Admin ──
-    function setSettingManager(address newManager) external onlyAdmin {
-        settingManagement = ISettingManagement(newManager);
+    /**
+     * @notice Stage a replacement {ISettingManagement}. The new manager
+     *         only takes effect after `SETTING_MANAGER_TIMELOCK` has
+     *         elapsed and {acceptSettingManager} is called.
+     *
+     * @dev April-audit C-3 patch. See StakedRUSD.proposeSettingManager
+     *      for the full rationale.
+     */
+    function proposeSettingManager(address newManager) external onlyAdmin {
+        if (newManager == address(0)) {
+            address cancelled = address(pendingSettingManagement);
+            delete pendingSettingManagement;
+            delete pendingSettingManagerEta;
+            emit SettingManagerProposalCancelled(cancelled);
+            return;
+        }
+        pendingSettingManagement = ISettingManagement(newManager);
+        pendingSettingManagerEta = block.timestamp + SETTING_MANAGER_TIMELOCK;
+        emit SettingManagerProposed(newManager, pendingSettingManagerEta);
+    }
+
+    function acceptSettingManager() external onlyAdmin {
+        if (address(pendingSettingManagement) == address(0)) revert NoPendingManager();
+        if (block.timestamp < pendingSettingManagerEta) revert TimelockNotElapsed(pendingSettingManagerEta);
+        settingManagement = pendingSettingManagement;
+        delete pendingSettingManagement;
+        delete pendingSettingManagerEta;
+        emit SettingManagerUpdated(address(settingManagement));
     }
 
     function pause() external onlyAdmin { _pause(); }

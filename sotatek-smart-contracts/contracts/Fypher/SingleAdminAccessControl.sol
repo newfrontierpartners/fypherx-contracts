@@ -26,6 +26,16 @@ abstract contract SingleAdminAccessControl is Initializable {
     address private _admin;
     address private _pendingAdmin;
     mapping(bytes32 => mapping(address => bool)) private _roles;
+    /**
+     * @dev Reserved-but-unused. The original layout anticipated a
+     *      per-role admin hierarchy à la OpenZeppelin AccessControl,
+     *      but the implementation below routes every grant/revoke
+     *      through the single `_admin` slot via the `onlyAdmin`
+     *      modifier. This mapping is never written and
+     *      {getRoleAdmin} always returns `bytes32(0)`. Kept in place
+     *      to preserve storage layout under TransparentProxy. April-
+     *      audit H-3 documentation patch.
+     */
     mapping(bytes32 => bytes32) private _roleAdmin;
 
     // ── Events ──
@@ -80,8 +90,25 @@ abstract contract SingleAdminAccessControl is Initializable {
         emit RoleRevoked(role, account, msg.sender);
     }
 
+    /**
+     * @notice Renounce a role held by the caller.
+     * @dev April-audit H-3 patch. Critical operational roles
+     *      (REWARDER_ROLE, RELEASE_TOKEN_ROLE) and the default admin
+     *      role (bytes32(0)) cannot be renounced — they must be
+     *      revoked through the admin path, ensuring there is always a
+     *      counterparty (the admin) acknowledging the loss of the
+     *      role. A holder who simultaneously renounced REWARDER_ROLE
+     *      could otherwise brick `transferInRewards` until the admin
+     *      noticed and re-granted the role; for the default admin
+     *      slot, a renounce would silently de-sync `hasRole` from
+     *      `_admin` (since hasRole(bytes32(0)) reads `_admin`, not
+     *      `_roles`).
+     */
     function renounceRole(bytes32 role, address account) external {
         require(account == msg.sender, "Can only renounce own role");
+        require(role != bytes32(0), "Cannot renounce admin role");
+        require(role != REWARDER_ROLE, "Cannot renounce REWARDER_ROLE");
+        require(role != RELEASE_TOKEN_ROLE, "Cannot renounce RELEASE_TOKEN_ROLE");
         _roles[role][account] = false;
         emit RoleRevoked(role, account, msg.sender);
     }
