@@ -40,4 +40,23 @@ describe("FypherOracleRouter", function () {
       router.connect(other).configureMarketOracle(marketId, await feed.getAddress(), 8, 120, true)
     , /not owner/);
   });
+
+  // April-audit M-10: a single global pause flag freezes every market in
+  // one tx instead of forcing the operator to walk the full market list
+  // when a feed misbehaves. Only the owner can flip it, and a flipped
+  // pause must make every {getPriceE18} read revert.
+  it("freezes price reads across all markets when paused, and only the owner can toggle", async function () {
+    const { owner, other, router } = await deployFixture();
+
+    await assert.rejects(router.connect(other).setPaused(true), /not owner/);
+
+    await router.connect(owner).setPaused(true);
+    assert.equal(await router.paused(), true);
+    await assert.rejects(router.getPriceE18(marketId), /oracle paused/);
+
+    await router.connect(owner).setPaused(false);
+    assert.equal(await router.paused(), false);
+    // Reads recover immediately on unpause.
+    assert.equal(await router.getPriceE18(marketId), ethers.parseUnits("60000", 18));
+  });
 });
