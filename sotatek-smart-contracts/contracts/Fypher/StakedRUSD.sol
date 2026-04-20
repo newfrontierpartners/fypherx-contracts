@@ -239,11 +239,24 @@ contract StakedRUSD is
         }
     }
 
+    /**
+     * @notice Release a non-asset token that was sent to this vault by
+     *         mistake (airdrops, wrong-token transfers, etc.) to an
+     *         arbitrary recipient. Gated by RELEASE_TOKEN_ROLE.
+     *
+     * @dev Mirrors the `token != asset()` guard that {rescueTokens}
+     *      already enforces. Without this check, any RELEASE_TOKEN_ROLE
+     *      holder could call `releaseToken(asset, attacker, balance)`
+     *      and drain every staker's underlying RUSD — a fund-loss path
+     *      identified by the April audit (C-5).
+     */
     function releaseToken(address token, address to, uint256 amount) external {
         require(
             settingManagement.hasRole(keccak256("RELEASE_TOKEN_ROLE"), msg.sender),
             "Not release role"
         );
+        require(token != asset(), "Cannot release staked asset");
+        require(to != address(0), "Zero recipient");
         IERC20(token).safeTransfer(to, amount);
     }
 
