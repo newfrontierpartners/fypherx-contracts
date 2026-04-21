@@ -282,6 +282,7 @@ async function openTrade(market: string, isLong: boolean, sizeStr: string, lever
     leverageE18
   );
   await logTx(`executeMatchedTrade`, tx);
+  return { isLong, sizeE18, entryPriceE18: markE18 };
 }
 
 async function cmdClose(market: string) {
@@ -290,7 +291,7 @@ async function cmdClose(market: string) {
   const p = await ch.positions(wallet.address, id);
   if (p[1] === 0n) {
     console.log(`  no open ${market} position`);
-    return;
+    return null;
   }
   const markE18 = (await router.getPriceE18(id)) as bigint;
   const closeIsLong = !p[0];
@@ -306,6 +307,7 @@ async function cmdClose(market: string) {
     ethers.parseUnits("1", 18)
   );
   await logTx(`executeMatchedTrade (close)`, tx);
+  return { isLong: p[0], sizeE18: p[1] as bigint, exitPriceE18: markE18, entryPriceE18: p[2] as bigint };
 }
 
 async function cmdFullDemo() {
@@ -336,18 +338,62 @@ async function cmdFullDemo() {
     console.log(`\n(Skipping deposit — collateral = ${fmtE18(snap0[0])})`);
   }
 
-  await openTrade("BTC-PERP", true, "0.01", "5");
-  await cmdStatus();
+  type Row = { side: string; entry: bigint; exit: bigint; size: bigint; pnl: bigint; collatBefore: bigint; collatAfter: bigint };
+  const rows: Row[] = [];
 
-  await cmdClose("BTC-PERP");
-  await cmdStatus();
+  const runRound = async (isLong: boolean) => {
+    const label = isLong ? "LONG" : "SHORT";
+    const before = (await ch.getAccountSnapshot(wallet.address))[0] as bigint;
+    const opened = await openTrade("BTC-PERP", isLong, "0.01", "5");
+    await cmdStatus();
+    const closed = await cmdClose("BTC-PERP");
+    await cmdStatus();
+    const after = (await ch.getAccountSnapshot(wallet.address))[0] as bigint;
+    if (opened && closed) {
+      rows.push({
+        side: label,
+        entry: opened.entryPriceE18,
+        exit: closed.exitPriceE18,
+        size: opened.sizeE18,
+        pnl: after - before,
+        collatBefore: before,
+        collatAfter: after,
+      });
+    }
+  };
 
-  await openTrade("BTC-PERP", false, "0.01", "5");
-  await cmdStatus();
+  const bnbBefore = await provider.getBalance(wallet.address);
+  const collatStart = (await ch.getAccountSnapshot(wallet.address))[0] as bigint;
 
-  await cmdClose("BTC-PERP");
-  await cmdStatus();
-  console.log("\n################ DEMO DONE ################\n");
+  await runRound(true);
+  await runRound(false);
+
+  const bnbAfter = await provider.getBalance(wallet.address);
+  const collatEnd = (await ch.getAccountSnapshot(wallet.address))[0] as bigint;
+  const totalPnl = collatEnd - collatStart;
+  const gasBnb = bnbBefore - bnbAfter;
+
+  console.log("\n================ P&L SUMMARY ================");
+  console.log("Trade   Entry        Exit         Δ Price    Size      PnL (RUSD)");
+  console.log("------  -----------  -----------  ---------  --------  ------------");
+  for (const r of rows) {
+    const deltaE18 = r.exit - r.entry;
+    const sign = deltaE18 >= 0n ? "+" : "-";
+    const absDelta = deltaE18 >= 0n ? deltaE18 : -deltaE18;
+    const pnlSign = r.pnl >= 0n ? "+" : "-";
+    const absPnl = r.pnl >= 0n ? r.pnl : -r.pnl;
+    console.log(
+      `${r.side.padEnd(6)}  $${fmtE18(r.entry, 2).padStart(10)}  $${fmtE18(r.exit, 2).padStart(10)}  ${sign}$${fmtE18(absDelta, 2).padStart(7)}  ${fmtE18(r.size).padStart(8)}  ${pnlSign}${fmtE18(absPnl, 6).padStart(11)}`
+    );
+  }
+  console.log("---------------------------------------------------------------");
+  const netSign = totalPnl >= 0n ? "+" : "-";
+  const absNet = totalPnl >= 0n ? totalPnl : -totalPnl;
+  console.log(`Collateral:   ${fmtE18(collatStart)} RUSD  →  ${fmtE18(collatEnd)} RUSD`);
+  console.log(`Net PnL:      ${netSign}${fmtE18(absNet, 6)} RUSD`);
+  console.log(`Gas spent:    ${ethers.formatEther(gasBnb)} BNB`);
+  console.log("=============================================\n");
+  console.log("################ DEMO DONE ################\n");
 }
 
 // ---------- Dispatch ----------
