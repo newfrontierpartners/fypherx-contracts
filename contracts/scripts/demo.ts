@@ -8,14 +8,16 @@
  *   status                  Print balances, account snapshot, positions, on-chain BTC mark
  *   sync-price [market]     Pull real spot price (BTCUSDT / ETHUSDT) from Binance
  *                           and write it to the MockPriceOracle (default: BTC-PERP)
- *   faucet <amount>         Mint RUSD to deployer (MockERC20 open mint). amount in RUSD
  *   approve <amount>        Approve clearinghouse to pull RUSD
  *   deposit <amount>        Deposit RUSD into the clearinghouse
  *   withdraw <amount>       Withdraw free collateral
  *   long  <market> <size> <leverage>   Open / add long
  *   short <market> <size> <leverage>   Open / add short
  *   close <market>          Close the entire position at current mark
- *   full-demo               Run end-to-end flow: sync → faucet → deposit → long → snapshot → close → short → close
+ *   keeper [markets...]     Stream Binance WS trades and push to MockPriceOracle
+ *                           with hybrid throttle (heartbeat 60s OR delta 10bps).
+ *                           Defaults to BTC-PERP,ETH-PERP. Ctrl+C to stop.
+ *   full-demo               Run end-to-end flow: sync → deposit → long → snapshot → close → short → close
  *
  * Size is the position size in base units (e.g. 0.01 BTC). Leverage is a decimal number (e.g. 5).
  */
@@ -56,7 +58,6 @@ const BINANCE_SYMBOL: Record<string, string> = {
 // ---------- Minimal ABIs ----------
 
 const ERC20_ABI = [
-  "function mint(address to, uint256 amount)",
   "function approve(address spender, uint256 amount) returns (bool)",
   "function balanceOf(address) view returns (uint256)",
   "function allowance(address,address) view returns (uint256)",
@@ -231,13 +232,6 @@ async function cmdSyncPrice(market = "BTC-PERP") {
   return markE18;
 }
 
-async function cmdFaucet(amountStr: string) {
-  const amount = ethers.parseUnits(amountStr, 18);
-  console.log(`\n=== Minting ${amountStr} RUSD to ${wallet.address} ===`);
-  const tx = await rusd.mint(wallet.address, amount);
-  await logTx(`rusd.mint`, tx);
-}
-
 async function cmdApprove(amountStr: string) {
   const amount = ethers.parseUnits(amountStr, 18);
   console.log(`\n=== Approving ${amountStr} RUSD → clearinghouse ===`);
@@ -319,23 +313,20 @@ async function cmdFullDemo() {
   const bal: bigint = await rusd.balanceOf(wallet.address);
   const snap0 = await ch.getAccountSnapshot(wallet.address);
   const TARGET = ethers.parseUnits("1000", 18);
-  if (snap0[0] < TARGET) {
-    if (bal < TARGET) {
-      try {
-        await cmdFaucet("5000");
-      } catch {
-        console.log(`  (RUSD.mint not callable — using existing balance ${fmtE18(bal)})`);
-      }
-    }
-    const freshBal: bigint = await rusd.balanceOf(wallet.address);
-    const depositAmt = freshBal < TARGET ? freshBal : TARGET;
-    if (depositAmt > 0n) {
-      await cmdDeposit(ethers.formatUnits(depositAmt, 18));
-    } else {
-      throw new Error(`Deployer has 0 RUSD; top up before running the demo`);
-    }
+  if (snap0[0] >= TARGET) {
+    console.log(`\n(Skipping deposit — collateral already ${fmtE18(snap0[0])} RUSD)`);
+  } else if (bal > 0n) {
+    const depositAmt = bal < TARGET ? bal : TARGET;
+    await cmdDeposit(ethers.formatUnits(depositAmt, 18));
   } else {
-    console.log(`\n(Skipping deposit — collateral = ${fmtE18(snap0[0])})`);
+    console.error(
+      `\n⚠️  Deployer has 0 RUSD and no collateral on the clearinghouse.\n` +
+      `   Please mint RUSD to ${wallet.address} first, then re-run \`npm run demo:full\`.\n` +
+      `   RUSD token: ${deployments.collateralToken}\n` +
+      `   Mint via the RUSD dApp / core protocol — this demo reuses the existing token,\n` +
+      `   it does NOT deploy a new RUSD or call a test faucet.\n`
+    );
+    process.exit(1);
   }
 
   type Row = { side: string; entry: bigint; exit: bigint; size: bigint; pnl: bigint; collatBefore: bigint; collatAfter: bigint };
@@ -405,7 +396,6 @@ async function main() {
     case "register-oracles":    return cmdRegisterOracles();
     case "configure-markets":   return cmdConfigureMarkets();
     case "sync-price":       return cmdSyncPrice(args[0]);
-    case "faucet":      return cmdFaucet(args[0] ?? "5000");
     case "approve":     return cmdApprove(args[0] ?? "10000");
     case "deposit":     return cmdDeposit(args[0] ?? "2000");
     case "withdraw":    return cmdWithdraw(args[0] ?? "100");
