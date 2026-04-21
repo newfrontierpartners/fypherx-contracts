@@ -1,4 +1,5 @@
 require("@nomicfoundation/hardhat-ethers");
+require("@nomicfoundation/hardhat-verify");
 require("dotenv").config();
 
 const privateKey = process.env.DEPLOYER_PRIVATE_KEY || "";
@@ -20,14 +21,26 @@ module.exports = {
       url: process.env.TESTNET_RPC_URL || "",
       accounts
     },
-    // BSC Testnet — the chain FypherX dev/demo targets. chainId 97.
-    // Set DEPLOYER_PRIVATE_KEY in .env and fund the wallet with testnet BNB
-    // (https://testnet.bnbchain.org/faucet-smart) before running the deploy
-    // script.
     bscTestnet: {
       url: process.env.BSC_TESTNET_RPC || "https://data-seed-prebsc-1-s1.binance.org:8545",
       chainId: 97,
       accounts
     }
+  },
+  etherscan: {
+    apiKey: process.env.BSCSCAN_API_KEY || "",
+    customChains: [
+      {
+        network: "bscTestnet",
+        chainId: 97,
+        urls: {
+          apiURL: "https://api.etherscan.io/v2/api?chainid=97",
+          browserURL: "https://testnet.bscscan.com"
+        }
+      }
+    ]
+  },
+  sourcify: {
+    enabled: false
   }
 };

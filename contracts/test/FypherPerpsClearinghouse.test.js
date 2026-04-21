@@ -261,4 +261,186 @@ describe("FypherPerpsClearinghouse", function () {
       clearinghouse.connect(liquidator).liquidate(trader.address, marketId)
     , /insurance underfunded/);
   });
+
+  // ── Admin / access control ───────────────────────────────────────────────
+  it("allows owner to transfer ownership", async function () {
+    const { owner, outsider, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(owner).setOwner(outsider.address);
+    assert.equal(await clearinghouse.owner(), outsider.address);
+  });
+
+  it("rejects setOwner from non-owner", async function () {
+    const { outsider, clearinghouse } = await deployFixture();
+    await assert.rejects(clearinghouse.connect(outsider).setOwner(outsider.address), /not owner/);
+  });
+
+  it("allows owner to add and revoke relayers and liquidators", async function () {
+    const { owner, outsider, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(owner).setRelayer(outsider.address, true);
+    assert.equal(await clearinghouse.relayers(outsider.address), true);
+    await clearinghouse.connect(owner).setRelayer(outsider.address, false);
+    assert.equal(await clearinghouse.relayers(outsider.address), false);
+
+    await clearinghouse.connect(owner).setLiquidator(outsider.address, true);
+    assert.equal(await clearinghouse.liquidators(outsider.address), true);
+  });
+
+  it("rejects configureMarket from non-owner", async function () {
+    const { outsider, clearinghouse } = await deployFixture();
+    await assert.rejects(
+      clearinghouse.connect(outsider).configureMarket(marketId, 500, 300, 2000, ethers.parseUnits("20", 18), ethers.parseUnits("5", 18), true),
+      /not owner/
+    );
+  });
+
+  it("rejects configureMarket with invalid margin params", async function () {
+    const { owner, clearinghouse } = await deployFixture();
+    const mkt = ethers.encodeBytes32String("NEW-PERP");
+    // initialMarginBps = 0
+    await assert.rejects(
+      clearinghouse.connect(owner).configureMarket(mkt, 0, 300, 2000, ethers.parseUnits("20", 18), ethers.parseUnits("5", 18), true),
+      /invalid im/
+    );
+    // maintenanceMarginBps > initialMarginBps
+    await assert.rejects(
+      clearinghouse.connect(owner).configureMarket(mkt, 300, 500, 2000, ethers.parseUnits("20", 18), ethers.parseUnits("5", 18), true),
+      /invalid mm/
+    );
+  });
+
+  // ── Deposit / withdraw ───────────────────────────────────────────────────
+  it("deposit and full withdraw with no open position", async function () {
+    const { trader, collateral, clearinghouse } = await deployFixture();
+    const dep = ethers.parseUnits("5000", 18);
+    const balBefore = await collateral.balanceOf(trader.address);
+    await clearinghouse.connect(trader).deposit(dep);
+    assert.equal(await clearinghouse.collateralBalanceE18(trader.address), dep);
+    await clearinghouse.connect(trader).withdraw(dep);
+    assert.equal(await clearinghouse.collateralBalanceE18(trader.address), 0n);
+    assert.equal(await collateral.balanceOf(trader.address), balBefore);
+  });
+
+  it("rejects zero deposit and zero withdraw", async function () {
+    const { trader, clearinghouse } = await deployFixture();
+    await assert.rejects(clearinghouse.connect(trader).deposit(0n), /invalid deposit/);
+    await assert.rejects(clearinghouse.connect(trader).withdraw(0n), /invalid withdraw/);
+  });
+
+  it("rejects withdraw exceeding collateral balance", async function () {
+    const { trader, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(trader).deposit(ethers.parseUnits("1000", 18));
+    await assert.rejects(
+      clearinghouse.connect(trader).withdraw(ethers.parseUnits("2000", 18)),
+      /insufficient collateral/
+    );
+  });
+
+  // ── View helpers ─────────────────────────────────────────────────────────
+  it("getConfiguredMarkets returns the market list", async function () {
+    const { clearinghouse } = await deployFixture();
+    const markets = await clearinghouse.getConfiguredMarkets();
+    assert.equal(markets.length, 1);
+    assert.equal(markets[0], marketId);
+  });
+
+  it("getAccountMarkets is empty before any trade", async function () {
+    const { trader, clearinghouse } = await deployFixture();
+    const acctMarkets = await clearinghouse.getAccountMarkets(trader.address);
+    assert.equal(acctMarkets.length, 0);
+  });
+
+  it("getAccountMarkets lists market after opening a position", async function () {
+    const { relayer, trader, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(trader).deposit(ethers.parseUnits("5000", 18));
+    await clearinghouse.connect(relayer).executeMatchedTrade(
+      trader.address, marketId, true,
+      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
+    );
+    const acctMarkets = await clearinghouse.getAccountMarkets(trader.address);
+    assert.equal(acctMarkets.length, 1);
+    assert.equal(acctMarkets[0], marketId);
+  });
+
+  it("getAccountSnapshot reflects position state correctly", async function () {
+    const { relayer, trader, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(trader).deposit(ethers.parseUnits("5000", 18));
+    await clearinghouse.connect(relayer).executeMatchedTrade(
+      trader.address, marketId, true,
+      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
+    );
+    const snap = await clearinghouse.getAccountSnapshot(trader.address);
+    assert.ok(snap.collateralE18 > 0n, "collateral should be positive");
+    assert.equal(snap.liquidatable, false);
+    assert.ok(snap.initialMarginUsedE18 > 0n, "initial margin should be non-zero");
+  });
+
+  it("isLiquidatable returns false for a healthy account", async function () {
+    const { relayer, trader, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(trader).deposit(ethers.parseUnits("10000", 18));
+    await clearinghouse.connect(relayer).executeMatchedTrade(
+      trader.address, marketId, true,
+      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
+    );
+    assert.equal(await clearinghouse.isLiquidatable(trader.address), false);
+  });
+
+  it("rejects liquidation of a healthy account", async function () {
+    const { relayer, liquidator, trader, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(trader).deposit(ethers.parseUnits("10000", 18));
+    await clearinghouse.connect(relayer).executeMatchedTrade(
+      trader.address, marketId, true,
+      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
+    );
+    await assert.rejects(
+      clearinghouse.connect(liquidator).liquidate(trader.address, marketId),
+      /account healthy/
+    );
+  });
+
+  // ── Reduce and close position ─────────────────────────────────────────────
+  it("reduces a position partially and closes it fully", async function () {
+    const { relayer, trader, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(trader).deposit(ethers.parseUnits("10000", 18));
+
+    // open 0.2 BTC long
+    await clearinghouse.connect(relayer).executeMatchedTrade(
+      trader.address, marketId, true,
+      ethers.parseUnits("0.2", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
+    );
+    // reduce by 0.1
+    await clearinghouse.connect(relayer).executeMatchedTrade(
+      trader.address, marketId, false,
+      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
+    );
+    let pos = await clearinghouse.positions(trader.address, marketId);
+    assert.equal(pos.sizeE18, ethers.parseUnits("0.1", 18));
+
+    // close remaining
+    await clearinghouse.connect(relayer).executeMatchedTrade(
+      trader.address, marketId, false,
+      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
+    );
+    pos = await clearinghouse.positions(trader.address, marketId);
+    assert.equal(pos.sizeE18, 0n);
+  });
+
+  // ── Inactive market ───────────────────────────────────────────────────────
+  it("rejects trades on an inactive market", async function () {
+    const { owner, relayer, trader, clearinghouse } = await deployFixture();
+    await clearinghouse.connect(trader).deposit(ethers.parseUnits("5000", 18));
+
+    // deactivate market
+    await clearinghouse.connect(owner).configureMarket(
+      marketId, 500, 300, 2000,
+      ethers.parseUnits("20", 18), ethers.parseUnits("5", 18), false
+    );
+
+    await assert.rejects(
+      clearinghouse.connect(relayer).executeMatchedTrade(
+        trader.address, marketId, true,
+        ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
+      ),
+      /market inactive/
+    );
+  });
 });
