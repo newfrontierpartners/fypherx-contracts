@@ -16,8 +16,13 @@
  *         liquidationBonusBps = 500 (5%)
  *         reserveFactorBps = 1000 (10%)
  *         supplyCap / borrowCap = 0 (uncapped for testnet)
- *    8. FypherLPVault (RUSD/USDT) owned by FypherLiquidityManager.
- *    9. FypherLiquidityManager (owner = deployer for now; transfer to Timelock in ops tx).
+ *    8. For each quote symbol in {USDT, USDC, FYUSD, FYP}:
+ *         a. PancakeV2 pair (factory.createPair if absent, else reuse).
+ *         b. FypherLPVault (RUSD/quote) owned by the deployer until step 9.
+ *    9. FypherLiquidityManager (owner = deployer for now).
+ *         a. Registers all four vaults.
+ *         b. Each vault.transferOwnership(manager).
+ *         c. manager.transferOwnership(Timelock).
  *
  *  The resulting addresses are merged into `deployed-addresses.json` in-place so downstream
  *  backend/frontend config updates can read from one source of truth.
@@ -34,6 +39,42 @@ const ADDR_PATH = path.join(__dirname, "..", "deployed-addresses.json");
 const WAD = 10n ** 18n;
 const ORACLE_PRICE_SCALE = 10n ** 36n;
 
+/**
+ * Quote symbols paired with RUSD on the LP side. Order matches the backend
+ * `application.yml` `lp-pairs` list and the frontend
+ * `liveLpPools.ts ALL_LP_POOL_CANDIDATES` table — keeping all three in sync
+ * is what makes the new symbols routable end-to-end.
+ *
+ * To add a fifth pair: deploy the quote token, append its symbol here,
+ * append the address mirror in `deployed-addresses.json`, then add the
+ * matching `lp-pairs` entry on the backend and `liveLpPools.ts` row on
+ * the frontend.
+ */
+const LP_QUOTES = ["USDT", "USDC", "FYUSD", "FYP"];
+
+/**
+ * Ensure a Pancake V2 pair exists for `(tokenA, tokenB)` — if `getPair`
+ * returns the zero address we create it on-chain and return the new pair.
+ *
+ * Returns the deployed pair address. The factory's pair is canonical: it
+ * doesn't matter which order tokenA/tokenB go in — V2 sorts them by address.
+ */
+async function ensurePair(factory, tokenA, tokenB, label) {
+  const existing = await factory.getPair(tokenA, tokenB);
+  if (existing !== ethers.ZeroAddress) {
+    console.log(`   ${label}: reused ${existing}`);
+    return existing;
+  }
+  const tx = await factory.createPair(tokenA, tokenB);
+  const rcpt = await tx.wait();
+  const pair = await factory.getPair(tokenA, tokenB);
+  if (pair === ethers.ZeroAddress) {
+    throw new Error(`createPair(${tokenA}, ${tokenB}) returned zero post-tx`);
+  }
+  console.log(`   ${label}: created ${pair}  (gas: ${rcpt.gasUsed.toString()})`);
+  return pair;
+}
+
 async function main() {
   const [deployer] = await ethers.getSigners();
   console.log("═══════════════════════════════════════════════════════");
@@ -45,7 +86,10 @@ async function main() {
   const existing = JSON.parse(fs.readFileSync(ADDR_PATH, "utf8"));
   const out = { ...existing };
 
-  const need = ["RUSD", "USDT", "PancakeV2Router", "PancakeV2Pair_RUSD_USDT"];
+  // RUSD + every quote token + the Pancake plumbing must already be in the
+  // address map. Pairs themselves are NOT required up front — step 8 calls
+  // `factory.createPair` if they're missing.
+  const need = ["RUSD", "PancakeV2Router", "PancakeV2Factory", ...LP_QUOTES];
   for (const k of need) {
     if (!out[k]) throw new Error(`missing ${k} in deployed-addresses.json`);
   }
@@ -144,23 +188,56 @@ async function main() {
   await (await fund.transferOwnership(out.FypherTimelock)).wait();
   console.log(`   fund ownership → Timelock ✓`);
 
-  // ── 8. LP Vault (RUSD/USDT) ──
-  console.log("\n── 8. FypherLPVault (RUSD/USDT) ──");
-  const LPVault = await ethers.getContractFactory("FypherLPVault");
-  const vault = await LPVault.deploy(
-    deployer.address,
-    out.RUSD,
-    out.USDT,
-    out.PancakeV2Pair_RUSD_USDT,
-    out.PancakeV2Router,
-    "Fypher LP Vault RUSD/USDT",
-    "fyLP-RUSD-USDT"
+  // ── 8. Pancake V2 pairs + FypherLPVaults (one per quote symbol) ──
+  // We loop over LP_QUOTES so {USDT, USDC, FYUSD, FYP} all share the
+  // same code path. Adding a fifth quote token = append to LP_QUOTES at
+  // the top of the file.
+  console.log("\n── 8. Pancake V2 pairs + FypherLPVaults ──");
+  const factoryAbi = [
+    "function getPair(address,address) view returns (address)",
+    "function createPair(address,address) returns (address)",
+  ];
+  const pancakeFactory = new ethers.Contract(
+    out.PancakeV2Factory,
+    factoryAbi,
+    deployer
   );
-  await vault.waitForDeployment();
-  out.FypherLPVault_RUSD_USDT = await vault.getAddress();
-  console.log(`   ${out.FypherLPVault_RUSD_USDT}`);
+  const LPVault = await ethers.getContractFactory("FypherLPVault");
 
-  // ── 9. Liquidity Manager ──
+  /** Each entry: { sym, vaultAddress } so step 9 can register them in order. */
+  const deployedVaults = [];
+  for (const sym of LP_QUOTES) {
+    const quoteAddr = out[sym];
+    if (!quoteAddr) {
+      throw new Error(`quote token ${sym} missing from deployed-addresses.json`);
+    }
+
+    // 8a. Ensure the Pancake V2 pair exists.
+    const pairAddr = await ensurePair(
+      pancakeFactory, out.RUSD, quoteAddr, `pair RUSD/${sym}`
+    );
+    out[`PancakeV2Pair_RUSD_${sym}`] = pairAddr;
+
+    // 8b. Deploy a vault for it. Owner stays as `deployer` until step 9
+    //     hands it to the manager (so we can register before transferring).
+    const vault = await LPVault.deploy(
+      deployer.address,
+      out.RUSD,
+      quoteAddr,
+      pairAddr,
+      out.PancakeV2Router,
+      `Fypher LP Vault RUSD/${sym}`,
+      `fyLP-RUSD-${sym}`
+    );
+    await vault.waitForDeployment();
+    const vaultAddr = await vault.getAddress();
+    out[`FypherLPVault_RUSD_${sym}`] = vaultAddr;
+    console.log(`   vault RUSD/${sym}: ${vaultAddr}`);
+
+    deployedVaults.push({ sym, vaultAddress: vaultAddr, vault });
+  }
+
+  // ── 9. Liquidity Manager — register every vault, hand ownership over ──
   console.log("\n── 9. FypherLiquidityManager ──");
   const LiquidityManager = await ethers.getContractFactory("FypherLiquidityManager");
   const mgr = await LiquidityManager.deploy(deployer.address, deployer.address);
@@ -168,11 +245,16 @@ async function main() {
   out.FypherLiquidityManager = await mgr.getAddress();
   console.log(`   ${out.FypherLiquidityManager}`);
 
-  // Transfer vault ownership to the manager; transfer manager ownership to Timelock.
-  await (await vault.transferOwnership(out.FypherLiquidityManager)).wait();
-  console.log(`   vault ownership → LiquidityManager ✓`);
-  await (await mgr.registerVault(out.FypherLPVault_RUSD_USDT)).wait();
-  console.log(`   manager.registerVault(vault) ✓`);
+  // Order matters: vaults must be transferred to the manager BEFORE the
+  // manager itself is handed to the Timelock — `registerVault` is `onlyOwner`
+  // and we want the deployer to do it during this script, not push a
+  // governance proposal for every Stage 4 quote.
+  for (const { sym, vaultAddress, vault } of deployedVaults) {
+    await (await vault.transferOwnership(out.FypherLiquidityManager)).wait();
+    console.log(`   vault RUSD/${sym} ownership → LiquidityManager ✓`);
+    await (await mgr.registerVault(vaultAddress)).wait();
+    console.log(`   manager.registerVault(RUSD/${sym}) ✓`);
+  }
   await (await mgr.transferOwnership(out.FypherTimelock)).wait();
   console.log(`   manager ownership → Timelock ✓`);
 
