@@ -2,12 +2,21 @@
  * Post-deploy verification — reads the just-deployed contracts and asserts
  * that every ownership handoff + every parameter we meant to set landed as
  * intended. No writes, so this is safe to re-run after merges.
+ *
+ * Stage 4 update: walks ALL FypherLPVaults registered with the manager
+ * (one per LP_QUOTES symbol), not just the legacy RUSD/USDT slot. The
+ * manager's own `vaultCount` + `vaults(i)` view is the source of truth so
+ * a vault that's deployed but never registered surfaces as a missing
+ * `mgr.vaults(i)` rather than a silent skip.
  */
 const { ethers } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
 
 const A = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "deployed-addresses.json"), "utf8"));
+
+/** Mirror of LP_QUOTES in deploy-lp-lending.js. Keep ordered. */
+const LP_QUOTES = ["USDT", "USDC", "FYUSD", "FYP"];
 
 async function main() {
   const p = ethers.provider;
@@ -50,14 +59,14 @@ async function main() {
     "function vaultCount() view returns (uint256)",
   ], p);
 
-  const vault = new ethers.Contract(A.FypherLPVault_RUSD_USDT, [
+  const vaultAbi = [
     "function owner() view returns (address)",
     "function rusd() view returns (address)",
     "function quoteToken() view returns (address)",
     "function pair() view returns (address)",
     "function router() view returns (address)",
     "function depositsPaused() view returns (bool)",
-  ], p);
+  ];
 
   const checks = [];
   const check = (label, got, want) => {
@@ -89,17 +98,34 @@ async function main() {
   check("router.owner → Timelock",     await router.owner(),                A.FypherTimelock);
   check("router.getAdapter(RUSD,USDT)",await router.getAdapter(A.RUSD, A.USDT), A.ConstantAdapter_RUSD_USDT);
   check("mgr.owner → Timelock",        await mgr.owner(),                   A.FypherTimelock);
-  check("mgr.vaults(0)",               await mgr.vaults(0),                 A.FypherLPVault_RUSD_USDT);
-  check("mgr.vaultCount",              await mgr.vaultCount(),              1n);
-  check("vault.owner → Manager",       await vault.owner(),                 A.FypherLiquidityManager);
-  check("vault.rusd",                  await vault.rusd(),                  A.RUSD);
-  check("vault.quoteToken",            await vault.quoteToken(),            A.USDT);
-  check("vault.pair",                  await vault.pair(),                  A.PancakeV2Pair_RUSD_USDT);
-  check("vault.router",                await vault.router(),                A.PancakeV2Router);
-  check("vault.depositsPaused",        await vault.depositsPaused(),        false);
+  check("mgr.vaultCount",              await mgr.vaultCount(),              BigInt(LP_QUOTES.length));
+
+  // Per-pair vault wiring. Loop matches the deploy-lp-lending.js order so
+  // `mgr.vaults(i)` lines up with LP_QUOTES[i]. If a quote was skipped on
+  // deploy (e.g. partial run), the address-map lookup throws and we fail
+  // loudly rather than checking against `undefined`.
+  for (let i = 0; i < LP_QUOTES.length; i++) {
+    const sym = LP_QUOTES[i];
+    const expectedVault = A[`FypherLPVault_RUSD_${sym}`];
+    const expectedPair  = A[`PancakeV2Pair_RUSD_${sym}`];
+    const expectedQuote = A[sym];
+    if (!expectedVault) throw new Error(`address map missing FypherLPVault_RUSD_${sym}`);
+    if (!expectedPair)  throw new Error(`address map missing PancakeV2Pair_RUSD_${sym}`);
+    if (!expectedQuote) throw new Error(`address map missing quote token ${sym}`);
+
+    check(`mgr.vaults(${i})  RUSD/${sym}`, await mgr.vaults(i), expectedVault);
+
+    const v = new ethers.Contract(expectedVault, vaultAbi, p);
+    check(`vault[${sym}].owner → Manager`,  await v.owner(),          A.FypherLiquidityManager);
+    check(`vault[${sym}].rusd`,             await v.rusd(),           A.RUSD);
+    check(`vault[${sym}].quoteToken`,       await v.quoteToken(),     expectedQuote);
+    check(`vault[${sym}].pair`,             await v.pair(),           expectedPair);
+    check(`vault[${sym}].router`,           await v.router(),         A.PancakeV2Router);
+    check(`vault[${sym}].depositsPaused`,   await v.depositsPaused(), false);
+  }
 
   for (const [s, label, detail] of checks) {
-    console.log(`${s} ${label.padEnd(32)} ${s === "✓" ? detail : "← " + detail}`);
+    console.log(`${s} ${label.padEnd(36)} ${s === "✓" ? detail : "← " + detail}`);
   }
   const failed = checks.filter(([s]) => s === "✗").length;
   console.log(`\n${failed === 0 ? "ALL OK" : `${failed} FAILED`}`);
