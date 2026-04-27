@@ -14,6 +14,17 @@ interface IRUSD {
 }
 
 /**
+ * @notice Minimal WETH9 interface — only the calls FypherMinting needs to
+ *         wrap incoming msg.value into the canonical wrapped-native ERC20
+ *         and forward it to custodian addresses.
+ */
+interface IWETH {
+    function deposit() external payable;
+    function transfer(address to, uint256 value) external returns (bool);
+    function balanceOf(address) external view returns (uint256);
+}
+
+/**
  * @title FypherMinting
  * @notice Collateral order matching and RUSD redeem with per-block rate limiting.
  *         Off-chain signed orders are verified on-chain using ECDSA.
@@ -65,7 +76,35 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     mapping(uint256 => uint256) public redeemedPerBlock;  // blockNumber => amount
 
     uint256 public stablesDeltaLimit;  // basis points
+    /// @dev Legacy global kill switch. Kept for backward compatibility +
+    ///      emergency global stop. New per-asset granularity (ADR-008)
+    ///      lives in {mintPaused} + {burnPaused} below; either gate
+    ///      tripping is sufficient to block the action.
     bool public mintRedeemDisabled;
+
+    // ── S1.2 / ADR-008 — appended slots, storage-layout safe ──
+
+    /// @notice ADR-007 §"Pauser carve-out". Latency-critical role that can
+    ///         only call {setMintPaused}. Pauser cannot mint, transfer,
+    ///         migrate, or unpause. Unpause requires admin (multisig).
+    address public pauserRole;
+
+    /// @notice ADR-008 per-asset mint pause. `mintPaused[asset] = true`
+    ///         blocks {mint} (and the {mintWETH} branch when the asset
+    ///         resolves to {wrappedNative}). Existing redeem flow is
+    ///         migrating to FypherBurnQueue (S1.1) and is not gated here.
+    mapping(address => bool) public mintPaused;
+
+    /// @notice Reserved for future per-asset burn pause if FypherMinting
+    ///         keeps a redeem path. Today FypherBurnQueue owns burn pause
+    ///         (see ADR-008 §FypherBurnQueue.burnPaused).
+    mapping(address => bool) public burnPaused;
+
+    /// @notice Wrapped native (WETH9 on Ethereum, WBNB on BSC). Required
+    ///         by {mintWETH} to wrap incoming msg.value into the ERC20
+    ///         representation that the existing custodian routes accept.
+    ///         Address differs per network (ADR-010); set at upgrade time.
+    IWETH public wrappedNative;
 
     // ── Events ──
     event Mint(address indexed benefactor, address indexed beneficiary, address collateral, uint256 collateralAmount, uint256 rusdAmount);
@@ -82,11 +121,18 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     event MaxMintPerBlockUpdated(uint256 newLimit);
     event MaxRedeemPerBlockUpdated(uint256 newLimit);
     event MintRedeemToggled(bool disabled);
+    // S1.2 events
+    event PauserRoleUpdated(address indexed oldPauser, address indexed newPauser);
+    event MintPausedSet(address indexed asset, bool paused);
+    event BurnPausedSet(address indexed asset, bool paused);
+    event WrappedNativeUpdated(address indexed wrappedNative);
 
     // ── Errors ──
     error NotAdmin();
     error NotExecutor();
+    error NotPauserOrAdmin();
     error MintRedeemDisabled();
+    error MintPausedForAsset();
     error InvalidSignature();
     error InvalidNonce();
     error ExpiredOrder();
@@ -96,6 +142,8 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     error StablesDeltaExceeded();
     error ZeroAddress();
     error InvalidAmount();
+    error WrappedNativeNotSet();
+    error WrongMsgValue(uint256 expected, uint256 received);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -127,8 +175,25 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         _;
     }
 
+    /// @notice S1.2 / ADR-007: pauser EOA OR admin (multisig) can pause.
+    ///         Unpause requires admin only — enforced inside {setMintPaused}.
+    modifier onlyPauserOrAdmin() {
+        if (msg.sender != pauserRole && !settingManagement.hasRole(bytes32(0), msg.sender)) {
+            revert NotPauserOrAdmin();
+        }
+        _;
+    }
+
     modifier whenMintRedeemEnabled() {
         if (mintRedeemDisabled) revert MintRedeemDisabled();
+        _;
+    }
+
+    /// @notice S1.2 / ADR-008: per-asset mint pause + legacy global gate.
+    ///         Either tripping is sufficient to revert.
+    modifier whenMintAllowed(address asset) {
+        if (mintRedeemDisabled) revert MintRedeemDisabled();
+        if (mintPaused[asset]) revert MintPausedForAsset();
         _;
     }
 
@@ -137,7 +202,7 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         Order calldata order,
         Route calldata route,
         bytes calldata signature
-    ) external nonReentrant whenMintRedeemEnabled {
+    ) external nonReentrant whenMintAllowed(order.collateral_asset) {
         _verifyOrder(order, signature);
         if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
         _checkMintLimit(order.rusd_amount);
@@ -158,16 +223,46 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         emit Mint(order.benefactor, order.beneficiary, order.collateral_asset, order.collateral_amount, order.rusd_amount);
     }
 
-    // ── Core: Mint with WETH (native) ──
+    // ── Core: Mint with native ETH/BNB (S1.2 — fixed) ──
+    /**
+     * @notice Wrap incoming `msg.value` into the configured wrapped-native
+     *         ERC20 ({wrappedNative}) and forward via the standard custodian
+     *         routes, then mint RUSD to the beneficiary.
+     *
+     *         Pre-S1.2 this function ignored msg.value entirely — anyone
+     *         with a valid backend signature could mint RUSD without
+     *         depositing any ETH. Now:
+     *           - {wrappedNative} must be configured (else WrappedNativeNotSet)
+     *           - msg.value MUST equal order.collateral_amount (else WrongMsgValue)
+     *           - order.collateral_asset MUST be the wrappedNative address
+     *             (so {whenMintAllowed} pause checks resolve correctly +
+     *             supportedAssets is enforced consistently)
+     */
     function mintWETH(
         Order calldata order,
         Route calldata route,
         bytes calldata signature
-    ) external payable nonReentrant whenMintRedeemEnabled {
+    ) external payable nonReentrant whenMintAllowed(order.collateral_asset) {
+        if (address(wrappedNative) == address(0)) revert WrappedNativeNotSet();
+        if (order.collateral_asset != address(wrappedNative)) revert UnsupportedAsset();
+        if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
+        if (msg.value != order.collateral_amount) revert WrongMsgValue(order.collateral_amount, msg.value);
+
         _verifyOrder(order, signature);
         _checkMintLimit(order.rusd_amount);
 
-        // Mint RUSD to beneficiary
+        // Wrap msg.value -> WETH9.deposit() credits this contract.
+        wrappedNative.deposit{value: msg.value}();
+
+        // Forward wrapped balance to custodians using the route ratios.
+        for (uint256 i = 0; i < route.addresses.length; i++) {
+            uint256 amount = (order.collateral_amount * route.ratios[i]) / 10000;
+            // Use safeTransfer (we hold the wrapped balance directly,
+            // not transferFrom from benefactor).
+            IERC20(address(wrappedNative)).safeTransfer(route.addresses[i], amount);
+        }
+
+        // Mint RUSD to beneficiary.
         IRUSD(address(rusd)).mint(order.beneficiary, order.rusd_amount);
 
         mintedPerBlock[block.number] += order.rusd_amount;
@@ -321,5 +416,47 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     function disableMintRedeem(bool disabled) external onlyAdmin {
         mintRedeemDisabled = disabled;
         emit MintRedeemToggled(disabled);
+    }
+
+    // ── S1.2 / ADR-008 admin ──
+
+    /**
+     * @notice Per-asset mint pause. ADR-007 §"Pauser carve-out" + ADR-008.
+     *         Pausing (paused=true) is callable by the {pauserRole} EOA
+     *         OR an admin (multisig). Unpausing (paused=false) is admin-only
+     *         — the asymmetric authorization defaults to "stop" under
+     *         operational uncertainty.
+     */
+    function setMintPaused(address asset, bool paused) external onlyPauserOrAdmin {
+        if (!paused) {
+            // Unpause requires admin (multisig) only.
+            if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
+        }
+        mintPaused[asset] = paused;
+        emit MintPausedSet(asset, paused);
+    }
+
+    /**
+     * @notice Per-asset burn pause for any future redeem path that lands
+     *         back in this contract. The active Phase 1 burn flow is in
+     *         FypherBurnQueue (S1.1) which has its own burnPaused mapping.
+     */
+    function setBurnPaused(address asset, bool paused) external onlyPauserOrAdmin {
+        if (!paused) {
+            if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
+        }
+        burnPaused[asset] = paused;
+        emit BurnPausedSet(asset, paused);
+    }
+
+    function setPauserRole(address newPauser) external onlyAdmin {
+        emit PauserRoleUpdated(pauserRole, newPauser);
+        pauserRole = newPauser;
+    }
+
+    function setWrappedNative(address newWrapped) external onlyAdmin {
+        if (newWrapped == address(0)) revert ZeroAddress();
+        wrappedNative = IWETH(newWrapped);
+        emit WrappedNativeUpdated(newWrapped);
     }
 }
