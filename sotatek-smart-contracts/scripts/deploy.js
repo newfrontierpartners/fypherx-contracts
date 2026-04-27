@@ -1,6 +1,5 @@
 const { ethers, upgrades, network } = require("hardhat");
-const fs = require("fs");
-const path = require("path");
+const addresses = require("./lib/addresses");
 
 // MockERC20 must never be deployed to a real production network — minting to
 // deployer is unrestricted and deploying these tokens on mainnet would brick
@@ -218,8 +217,18 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════");
   for (const [k, v] of Object.entries(deployed)) console.log(`  ${k.padEnd(20)} ${v}`);
 
-  fs.writeFileSync(path.join(__dirname, "..", "deployed-addresses.json"), JSON.stringify(deployed, null, 2));
-  console.log("\nSaved to deployed-addresses.json");
+  // ADR-010: per-chain addresses are the source of truth. The legacy
+  // deployed-addresses.json is mirrored for back-compat with the dozen+
+  // existing scripts that read it directly.
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+  addresses.save(chainId, deployed);
+  console.log(`\nSaved to addresses/${chainId}.json (mirrored to deployed-addresses.json)`);
 }
 
-main().catch((e) => { console.error(e); process.exitCode = 1; });
+module.exports = main;
+
+// When run directly via `npx hardhat run scripts/deploy.js`, fire main().
+// When required by a per-network entrypoint, the entrypoint awaits main().
+if (require.main === module) {
+  main().catch((e) => { console.error(e); process.exitCode = 1; });
+}
