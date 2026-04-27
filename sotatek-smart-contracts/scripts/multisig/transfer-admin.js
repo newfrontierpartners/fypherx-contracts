@@ -11,8 +11,7 @@
  *   npx hardhat run scripts/multisig/transfer-admin.js --network bscTestnet
  */
 const { ethers, network } = require("hardhat");
-const fs = require("fs");
-const path = require("path");
+const addresses = require("../lib/addresses");
 
 async function main() {
   const [eoaAdmin] = await ethers.getSigners();
@@ -23,18 +22,7 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════");
   console.log("Caller (current EOA admin):", eoaAdmin.address);
 
-  // Load addresses (per-chain first, fall back to flat).
-  const perChainPath = path.join(__dirname, "..", "..", "addresses", `${chainId}.json`);
-  const flatPath = path.join(__dirname, "..", "..", "deployed-addresses.json");
-  let addrs;
-  if (fs.existsSync(perChainPath)) {
-    addrs = JSON.parse(fs.readFileSync(perChainPath, "utf8"));
-  } else if (fs.existsSync(flatPath)) {
-    addrs = JSON.parse(fs.readFileSync(flatPath, "utf8"));
-  } else {
-    throw new Error("No addresses file found");
-  }
-
+  const addrs = addresses.load(chainId);
   const settingMgmt = addrs.SettingManagement;
   const safe = addrs.MultisigSafe;
   if (!settingMgmt) throw new Error("SettingManagement address not in addresses file");

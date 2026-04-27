@@ -17,6 +17,7 @@
 const { ethers, network } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
+const addresses = require("../lib/addresses");
 const { getSafeConfig, SAFE_PROXY_FACTORY_ABI, SAFE_SINGLETON_ABI } = require("./safe-config");
 
 async function main() {
@@ -107,28 +108,11 @@ async function main() {
   if (onChainOwners.length !== owners.length) throw new Error("Owner count mismatch");
   if (Number(onChainThreshold) !== threshold) throw new Error("Threshold mismatch");
 
-  // Append to addresses file. Pre-S1.9 layout uses deployed-addresses.json;
-  // post-S1.9 will use addresses/{chainId}.json — script handles both.
-  const flatAddrPath = path.join(__dirname, "..", "..", "deployed-addresses.json");
-  const perChainDir = path.join(__dirname, "..", "..", "addresses");
-  const perChainPath = path.join(perChainDir, `${chainId}.json`);
-  let addrs = {};
-  if (fs.existsSync(perChainPath)) {
-    addrs = JSON.parse(fs.readFileSync(perChainPath, "utf8"));
-    addrs.MultisigSafe = safeAddress;
-    fs.writeFileSync(perChainPath, JSON.stringify(addrs, null, 2));
-    console.log(`\n✓ Wrote MultisigSafe to ${path.relative(process.cwd(), perChainPath)}`);
-  } else if (fs.existsSync(flatAddrPath)) {
-    addrs = JSON.parse(fs.readFileSync(flatAddrPath, "utf8"));
-    addrs.MultisigSafe = safeAddress;
-    fs.writeFileSync(flatAddrPath, JSON.stringify(addrs, null, 2));
-    console.log(`\n✓ Wrote MultisigSafe to ${path.basename(flatAddrPath)}`);
-  } else {
-    console.warn(
-      "\nWARNING: neither deployed-addresses.json nor addresses/${chainId}.json found. " +
-      `Safe address NOT persisted. Address: ${safeAddress}`,
-    );
-  }
+  // Persist via the per-chain addresses helper (writes to
+  // addresses/{chainId}.json AND mirrors to deployed-addresses.json for
+  // back-compat with older scripts).
+  addresses.setOne(chainId, "MultisigSafe", safeAddress);
+  console.log(`\n✓ Wrote MultisigSafe to addresses/${chainId}.json`);
 
   console.log("\nNext steps (per ADR-007):");
   console.log("  1. Run scripts/multisig/transfer-admin.js to call ");

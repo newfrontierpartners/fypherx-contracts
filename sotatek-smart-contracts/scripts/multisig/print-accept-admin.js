@@ -25,23 +25,11 @@
  *   npx hardhat run scripts/multisig/print-accept-admin.js --network bscTestnet
  */
 const { ethers, network } = require("hardhat");
-const fs = require("fs");
-const path = require("path");
+const addresses = require("../lib/addresses");
 
 async function main() {
   const chainId = Number((await ethers.provider.getNetwork()).chainId);
-
-  // Load addresses.
-  const perChainPath = path.join(__dirname, "..", "..", "addresses", `${chainId}.json`);
-  const flatPath = path.join(__dirname, "..", "..", "deployed-addresses.json");
-  let addrs;
-  if (fs.existsSync(perChainPath)) {
-    addrs = JSON.parse(fs.readFileSync(perChainPath, "utf8"));
-  } else if (fs.existsSync(flatPath)) {
-    addrs = JSON.parse(fs.readFileSync(flatPath, "utf8"));
-  } else {
-    throw new Error("No addresses file found");
-  }
+  const addrs = addresses.load(chainId);
   const settingMgmt = addrs.SettingManagement;
   const safe = addrs.MultisigSafe;
   if (!settingMgmt) throw new Error("SettingManagement address not in addresses file");
