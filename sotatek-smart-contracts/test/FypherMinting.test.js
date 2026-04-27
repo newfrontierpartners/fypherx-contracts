@@ -1,64 +1,77 @@
 /**
- * FypherMinting — S1.2 surface tests.
+ * FypherMinting — post-merge test surface.
  *
- * Focus: the new behaviour added in S1.2 (per-asset mint pause + pauser
- * carve-out + mintWETH that actually wraps msg.value). Pre-existing
- * mint/redeem ABI is exercised end-to-end as part of the happy paths.
+ * Covers two layered concerns:
  *
- * NOTE: storage layout compatibility with the BSC Testnet proxy at
- *       0x0Cc3De38A1ff577f23d14a4714530FCc11b24690 is enforced at deploy
- *       time by @openzeppelin/hardhat-upgrades' validation; this file
- *       does not re-test that.
+ *  1. The April-audit P0 patches that landed on `main` (EIP-712 typed
+ *     data + OrderType-bound digest, route validation, escrow-keyed
+ *     redeem flow, mintWETH deprecation).
+ *  2. The S1.2 / ADR-008 per-asset mint pause + pauserRole carve-out.
+ *
+ * The mintWETH wrap path that S1.2 originally tried to "fix" is gone:
+ * audit kept the function as a permanently-reverting stub, and any
+ * native-token mint flow now goes through {mint} with a wrapped-native
+ * ERC20 as `collateral_asset`.
  */
 const assert = require("node:assert/strict");
 const { ethers, upgrades } = require("hardhat");
 
 const ONE = 10n ** 18n;
 
-async function signOrder(signer, order) {
-  const orderHash = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "address", "address", "uint256", "uint256", "uint256", "uint256"],
-      [
-        order.benefactor,
-        order.beneficiary,
-        order.collateral_asset,
-        order.collateral_amount,
-        order.rusd_amount,
-        order.nonce,
-        order.expiry,
-      ],
-    ),
-  );
-  return signer.signMessage(ethers.getBytes(orderHash));
+// EIP-712 type hash — must match FypherMinting.ORDER_TYPEHASH bytes32
+// (i.e. keccak256 of the canonical type string).
+const ORDER_TYPE_STRING =
+  "Order(uint8 orderType,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 rusd_amount,uint256 nonce,uint256 expiry)";
+
+const ORDER_TYPES = {
+  Order: [
+    { name: "orderType",         type: "uint8"   },
+    { name: "benefactor",        type: "address" },
+    { name: "beneficiary",       type: "address" },
+    { name: "collateral_asset",  type: "address" },
+    { name: "collateral_amount", type: "uint256" },
+    { name: "rusd_amount",       type: "uint256" },
+    { name: "nonce",             type: "uint256" },
+    { name: "expiry",            type: "uint256" },
+  ],
+};
+
+const ORDER_TYPE = { MINT: 0, REDEEM: 1 };
+
+async function signOrder(signer, mintingAddress, order, orderType) {
+  const network = await ethers.provider.getNetwork();
+  const domain = {
+    name: "FypherMinting",
+    version: "1",
+    chainId: Number(network.chainId),
+    verifyingContract: mintingAddress,
+  };
+  const value = { ...order, orderType };
+  return signer.signTypedData(domain, ORDER_TYPES, value);
+}
+
+async function nowPlus(seconds) {
+  const blk = await ethers.provider.getBlock("latest");
+  return BigInt(blk.timestamp + seconds);
 }
 
 async function deployFixture() {
   const [deployer, alice, backend, executor, pauser, custodian, nonAdmin] =
     await ethers.getSigners();
 
-  // SettingManagement (admin = deployer).
   const SettingManagement = await ethers.getContractFactory("SettingManagement");
   const setting = await upgrades.deployProxy(SettingManagement, [deployer.address], {
-    initializer: "initialize",
-    kind: "transparent",
+    initializer: "initialize", kind: "transparent",
   });
 
-  // RUSD with deployer as the (only) minter for test seeding; later we
-  // hand the minter off to FypherMinting so it can mint inside `mint()`.
   const RUSD = await ethers.getContractFactory("RUSD");
   const rusd = await upgrades.deployProxy(RUSD, [deployer.address], {
-    initializer: "initialize",
-    kind: "transparent",
+    initializer: "initialize", kind: "transparent",
   });
 
   const MockERC20 = await ethers.getContractFactory("MockERC20");
   const usdt = await MockERC20.deploy("Mock USDT", "mUSDT", 18);
 
-  const MockWETH = await ethers.getContractFactory("MockWETH");
-  const weth = await MockWETH.deploy();
-
-  // FypherMinting.
   const Minting = await ethers.getContractFactory("FypherMinting");
   const minting = await upgrades.deployProxy(
     Minting,
@@ -71,37 +84,111 @@ async function deployFixture() {
     { initializer: "initialize", kind: "transparent" },
   );
 
-  // Wire RUSD minter to FypherMinting so mint() can call IRUSD.mint inside.
+  // FypherMinting is the only minter on RUSD.
   await (await rusd.setMinter(await minting.getAddress())).wait();
 
-  // Configure: support both USDT and WETH; set wrappedNative; set pauser.
+  // Whitelist USDT + the custodian per April-audit C-4 route validation.
   await (await minting.addSupportedAsset(await usdt.getAddress())).wait();
-  await (await minting.addSupportedAsset(await weth.getAddress())).wait();
-  await (await minting.setWrappedNative(await weth.getAddress())).wait();
+  await (await minting.addCustodianAddress(custodian.address)).wait();
   await (await minting.setPauserRole(pauser.address)).wait();
 
-  // Seed alice with USDT + approve.
+  // Seed alice with USDT + approve the minter.
   await (await usdt.mint(alice.address, 10_000n * ONE)).wait();
   await (
     await usdt.connect(alice).approve(await minting.getAddress(), ethers.MaxUint256)
   ).wait();
 
-  return {
-    deployer, alice, backend, executor, pauser, custodian, nonAdmin,
-    setting, rusd, usdt, weth, minting,
-  };
+  return { deployer, alice, backend, executor, pauser, custodian, nonAdmin,
+           setting, rusd, usdt, minting };
 }
 
-describe("FypherMinting (S1.2 refactor)", () => {
-  describe("per-asset mint pause", () => {
-    it("setMintPaused(true) by pauser blocks mint() for that asset only", async () => {
-      const { alice, backend, pauser, usdt, weth, minting } = await deployFixture();
-      // Pause USDT only.
+describe("FypherMinting (post-merge: April-audit + S1.2 ADR-008)", () => {
+  describe("ORDER_TYPEHASH", () => {
+    it("matches the canonical Order type string keccak256", async () => {
+      const { minting } = await deployFixture();
+      const expected = ethers.keccak256(ethers.toUtf8Bytes(ORDER_TYPE_STRING));
+      assert.equal(await minting.ORDER_TYPEHASH(), expected);
+    });
+  });
+
+  describe("mint happy path", () => {
+    it("verifies EIP-712(OrderType.MINT) signature, transfers via custodian route, mints RUSD", async () => {
+      const { alice, backend, custodian, usdt, rusd, minting } = await deployFixture();
+      const order = {
+        benefactor: alice.address,
+        beneficiary: alice.address,
+        collateral_asset: await usdt.getAddress(),
+        collateral_amount: 200n * ONE,
+        rusd_amount: 200n * ONE,
+        nonce: 7n,
+        expiry: await nowPlus(600),
+      };
+      const sig = await signOrder(backend, await minting.getAddress(), order, ORDER_TYPE.MINT);
+      const route = { addresses: [custodian.address], ratios: [10000] };
+
+      await (await minting.connect(alice).mint(order, route, sig)).wait();
+
+      assert.equal(await usdt.balanceOf(custodian.address), 200n * ONE);
+      assert.equal(await rusd.balanceOf(alice.address), 200n * ONE);
+      assert.equal(await minting.verifyNonce(alice.address, 7n), false); // burnt
+    });
+
+    it("rejects an order signed with OrderType.REDEEM (replay protection across types)", async () => {
+      const { alice, backend, custodian, usdt, minting } = await deployFixture();
+      const order = {
+        benefactor: alice.address,
+        beneficiary: alice.address,
+        collateral_asset: await usdt.getAddress(),
+        collateral_amount: 50n * ONE,
+        rusd_amount: 50n * ONE,
+        nonce: 11n,
+        expiry: await nowPlus(600),
+      };
+      // Wrong OrderType — would have worked under the legacy non-typed sig.
+      const sig = await signOrder(backend, await minting.getAddress(), order, ORDER_TYPE.REDEEM);
+      const route = { addresses: [custodian.address], ratios: [10000] };
+      await assert.rejects(
+        minting.connect(alice).mint(order, route, sig),
+        (err) => err.message.includes("InvalidSignature"),
+      );
+    });
+
+    it("rejects routes with non-custodian destinations or wrong ratio sum (C-4)", async () => {
+      const { alice, backend, custodian, nonAdmin, usdt, minting } = await deployFixture();
+      const baseOrder = {
+        benefactor: alice.address,
+        beneficiary: alice.address,
+        collateral_asset: await usdt.getAddress(),
+        collateral_amount: 50n * ONE,
+        rusd_amount: 50n * ONE,
+        nonce: 21n,
+        expiry: await nowPlus(600),
+      };
+      const sig = await signOrder(backend, await minting.getAddress(), baseOrder, ORDER_TYPE.MINT);
+
+      // nonAdmin is NOT a whitelisted custodian — must revert InvalidRoute.
+      await assert.rejects(
+        minting.connect(alice).mint(baseOrder, { addresses: [nonAdmin.address], ratios: [10000] }, sig),
+        (err) => err.message.includes("InvalidRoute"),
+      );
+
+      // Ratios summing to !=10000 — revert InvalidRoute.
+      const splitOrder = { ...baseOrder, nonce: 22n };
+      const splitSig = await signOrder(backend, await minting.getAddress(), splitOrder, ORDER_TYPE.MINT);
+      await assert.rejects(
+        minting.connect(alice).mint(splitOrder, { addresses: [custodian.address], ratios: [9999] }, splitSig),
+        (err) => err.message.includes("InvalidRoute"),
+      );
+    });
+  });
+
+  describe("S1.2 / ADR-008 — per-asset mint pause", () => {
+    it("setMintPaused(true) by pauser blocks mint for that asset only", async () => {
+      const { alice, backend, custodian, pauser, usdt, minting } = await deployFixture();
       await (
         await minting.connect(pauser).setMintPaused(await usdt.getAddress(), true)
       ).wait();
       assert.equal(await minting.mintPaused(await usdt.getAddress()), true);
-      assert.equal(await minting.mintPaused(await weth.getAddress()), false);
 
       const order = {
         benefactor: alice.address,
@@ -109,28 +196,26 @@ describe("FypherMinting (S1.2 refactor)", () => {
         collateral_asset: await usdt.getAddress(),
         collateral_amount: 100n * ONE,
         rusd_amount: 100n * ONE,
-        nonce: 1n,
-        expiry: BigInt((await ethers.provider.getBlock("latest")).timestamp + 600),
+        nonce: 31n,
+        expiry: await nowPlus(600),
       };
-      const sig = await signOrder(backend, order);
-      const route = { addresses: [pauser.address], ratios: [10000] };
+      const sig = await signOrder(backend, await minting.getAddress(), order, ORDER_TYPE.MINT);
+      const route = { addresses: [custodian.address], ratios: [10000] };
       await assert.rejects(
         minting.connect(alice).mint(order, route, sig),
         (err) => err.message.includes("MintPausedForAsset"),
       );
     });
 
-    it("setMintPaused(false) requires admin (multisig) — pauser cannot unpause", async () => {
+    it("setMintPaused(false) is admin-only — pauser cannot unpause", async () => {
       const { deployer, pauser, usdt, minting } = await deployFixture();
       await (
         await minting.connect(pauser).setMintPaused(await usdt.getAddress(), true)
       ).wait();
-      // Pauser tries to unpause — must revert NotAdmin.
       await assert.rejects(
         minting.connect(pauser).setMintPaused(await usdt.getAddress(), false),
         (err) => err.message.includes("NotAdmin"),
       );
-      // Admin (deployer) can unpause.
       await (
         await minting.connect(deployer).setMintPaused(await usdt.getAddress(), false)
       ).wait();
@@ -145,8 +230,8 @@ describe("FypherMinting (S1.2 refactor)", () => {
       );
     });
 
-    it("legacy disableMintRedeem still gates everything (defense in depth)", async () => {
-      const { deployer, alice, backend, pauser, usdt, minting } = await deployFixture();
+    it("legacy disableMintRedeem still acts as the global kill switch", async () => {
+      const { deployer, alice, backend, custodian, usdt, minting } = await deployFixture();
       await (await minting.connect(deployer).disableMintRedeem(true)).wait();
       const order = {
         benefactor: alice.address,
@@ -154,11 +239,11 @@ describe("FypherMinting (S1.2 refactor)", () => {
         collateral_asset: await usdt.getAddress(),
         collateral_amount: 50n * ONE,
         rusd_amount: 50n * ONE,
-        nonce: 99n,
-        expiry: BigInt((await ethers.provider.getBlock("latest")).timestamp + 600),
+        nonce: 41n,
+        expiry: await nowPlus(600),
       };
-      const sig = await signOrder(backend, order);
-      const route = { addresses: [pauser.address], ratios: [10000] };
+      const sig = await signOrder(backend, await minting.getAddress(), order, ORDER_TYPE.MINT);
+      const route = { addresses: [custodian.address], ratios: [10000] };
       await assert.rejects(
         minting.connect(alice).mint(order, route, sig),
         (err) => err.message.includes("MintRedeemDisabled"),
@@ -166,178 +251,30 @@ describe("FypherMinting (S1.2 refactor)", () => {
     });
   });
 
-  describe("mint happy path (regression)", () => {
-    it("transfers USDT to custodian and mints RUSD to beneficiary", async () => {
-      const { alice, backend, custodian, usdt, rusd, minting } = await deployFixture();
-      const order = {
+  describe("mintWETH — permanently deprecated (audit P0)", () => {
+    it("reverts DeprecatedFunction for any caller, ignoring msg.value", async () => {
+      const { alice, usdt, minting } = await deployFixture();
+      const dummyOrder = {
         benefactor: alice.address,
         beneficiary: alice.address,
         collateral_asset: await usdt.getAddress(),
-        collateral_amount: 200n * ONE,
-        rusd_amount: 200n * ONE,
-        nonce: 7n,
-        expiry: BigInt((await ethers.provider.getBlock("latest")).timestamp + 600),
+        collateral_amount: 1n,
+        rusd_amount: 1n,
+        nonce: 51n,
+        expiry: await nowPlus(600),
       };
-      const sig = await signOrder(backend, order);
-      const route = { addresses: [custodian.address], ratios: [10000] };
-
-      await (await minting.connect(alice).mint(order, route, sig)).wait();
-
-      assert.equal(await usdt.balanceOf(custodian.address), 200n * ONE);
-      assert.equal(await rusd.balanceOf(alice.address), 200n * ONE);
-      assert.equal(await minting.verifyNonce(alice.address, 7n), false);
-    });
-  });
-
-  describe("mintWETH (S1.2 fix — actually wraps msg.value)", () => {
-    it("requires msg.value == order.collateral_amount", async () => {
-      const { alice, backend, weth, minting, custodian } = await deployFixture();
-      const order = {
-        benefactor: alice.address,
-        beneficiary: alice.address,
-        collateral_asset: await weth.getAddress(),
-        collateral_amount: ethers.parseEther("1"),
-        rusd_amount: 1000n * ONE,
-        nonce: 11n,
-        expiry: BigInt((await ethers.provider.getBlock("latest")).timestamp + 600),
-      };
-      const sig = await signOrder(backend, order);
-      const route = { addresses: [custodian.address], ratios: [10000] };
-
-      // msg.value too low.
       await assert.rejects(
-        minting.connect(alice).mintWETH(order, route, sig, { value: ethers.parseEther("0.5") }),
-        (err) => err.message.includes("WrongMsgValue"),
-      );
-
-      // msg.value too high.
-      await assert.rejects(
-        minting.connect(alice).mintWETH(order, route, sig, { value: ethers.parseEther("2") }),
-        (err) => err.message.includes("WrongMsgValue"),
-      );
-    });
-
-    it("rejects non-wrapped-native collateral_asset", async () => {
-      const { alice, backend, usdt, minting, custodian } = await deployFixture();
-      const order = {
-        benefactor: alice.address,
-        beneficiary: alice.address,
-        collateral_asset: await usdt.getAddress(),
-        collateral_amount: ethers.parseEther("1"),
-        rusd_amount: 100n * ONE,
-        nonce: 13n,
-        expiry: BigInt((await ethers.provider.getBlock("latest")).timestamp + 600),
-      };
-      const sig = await signOrder(backend, order);
-      const route = { addresses: [custodian.address], ratios: [10000] };
-      await assert.rejects(
-        minting.connect(alice).mintWETH(order, route, sig, { value: ethers.parseEther("1") }),
-        (err) => err.message.includes("UnsupportedAsset"),
-      );
-    });
-
-    it("happy path wraps msg.value, forwards WETH, mints RUSD", async () => {
-      const { alice, backend, custodian, weth, rusd, minting } = await deployFixture();
-      const value = ethers.parseEther("1.5");
-      const order = {
-        benefactor: alice.address,
-        beneficiary: alice.address,
-        collateral_asset: await weth.getAddress(),
-        collateral_amount: value,
-        rusd_amount: 4500n * ONE,  // 1.5 ETH @ $3000 example, contract is price-agnostic
-        nonce: 21n,
-        expiry: BigInt((await ethers.provider.getBlock("latest")).timestamp + 600),
-      };
-      const sig = await signOrder(backend, order);
-      const route = { addresses: [custodian.address], ratios: [10000] };
-
-      const aliceEthBefore = await ethers.provider.getBalance(alice.address);
-      const tx = await minting.connect(alice).mintWETH(order, route, sig, { value });
-      const receipt = await tx.wait();
-
-      // Custodian got the WETH.
-      assert.equal(await weth.balanceOf(custodian.address), value);
-      // Alice got the RUSD.
-      assert.equal(await rusd.balanceOf(alice.address), 4500n * ONE);
-      // Alice paid value + gas in native ETH.
-      const gasUsed = receipt.gasUsed * receipt.gasPrice;
-      const aliceEthAfter = await ethers.provider.getBalance(alice.address);
-      assert.equal(aliceEthBefore - aliceEthAfter, value + gasUsed);
-      // FypherMinting holds no leftover WETH (full forward).
-      assert.equal(await weth.balanceOf(await minting.getAddress()), 0n);
-    });
-
-    it("blocked when wrappedNative not configured", async () => {
-      // Fresh fixture without setWrappedNative call.
-      const [deployer, alice, backend, executor] = await ethers.getSigners();
-      const SettingManagement = await ethers.getContractFactory("SettingManagement");
-      const setting = await upgrades.deployProxy(SettingManagement, [deployer.address], {
-        initializer: "initialize", kind: "transparent",
-      });
-      const RUSD = await ethers.getContractFactory("RUSD");
-      const rusd = await upgrades.deployProxy(RUSD, [deployer.address], {
-        initializer: "initialize", kind: "transparent",
-      });
-      const Minting = await ethers.getContractFactory("FypherMinting");
-      const minting = await upgrades.deployProxy(Minting, [
-        await setting.getAddress(), await rusd.getAddress(), backend.address, executor.address,
-      ], { initializer: "initialize", kind: "transparent" });
-      await (await rusd.setMinter(await minting.getAddress())).wait();
-
-      const MockWETH = await ethers.getContractFactory("MockWETH");
-      const weth = await MockWETH.deploy();
-      // Add as supported asset but DON'T set wrappedNative.
-      await (await minting.addSupportedAsset(await weth.getAddress())).wait();
-
-      const order = {
-        benefactor: alice.address,
-        beneficiary: alice.address,
-        collateral_asset: await weth.getAddress(),
-        collateral_amount: ethers.parseEther("1"),
-        rusd_amount: 100n * ONE,
-        nonce: 31n,
-        expiry: BigInt((await ethers.provider.getBlock("latest")).timestamp + 600),
-      };
-      const sig = await signOrder(backend, order);
-      const route = { addresses: [deployer.address], ratios: [10000] };
-      await assert.rejects(
-        minting.connect(alice).mintWETH(order, route, sig, { value: ethers.parseEther("1") }),
-        (err) => err.message.includes("WrappedNativeNotSet"),
-      );
-    });
-
-    it("respects per-asset pause for WETH", async () => {
-      const { alice, backend, pauser, custodian, weth, minting } = await deployFixture();
-      await (
-        await minting.connect(pauser).setMintPaused(await weth.getAddress(), true)
-      ).wait();
-      const order = {
-        benefactor: alice.address,
-        beneficiary: alice.address,
-        collateral_asset: await weth.getAddress(),
-        collateral_amount: ethers.parseEther("1"),
-        rusd_amount: 100n * ONE,
-        nonce: 41n,
-        expiry: BigInt((await ethers.provider.getBlock("latest")).timestamp + 600),
-      };
-      const sig = await signOrder(backend, order);
-      const route = { addresses: [custodian.address], ratios: [10000] };
-      await assert.rejects(
-        minting.connect(alice).mintWETH(order, route, sig, { value: ethers.parseEther("1") }),
-        (err) => err.message.includes("MintPausedForAsset"),
+        minting.connect(alice).mintWETH(dummyOrder, { addresses: [], ratios: [] }, "0x", { value: ethers.parseEther("1") }),
+        (err) => err.message.includes("DeprecatedFunction"),
       );
     });
   });
 
-  describe("admin guards", () => {
-    it("setPauserRole / setWrappedNative are admin-only", async () => {
-      const { nonAdmin, weth, minting } = await deployFixture();
+  describe("admin guards (S1.2)", () => {
+    it("setPauserRole is admin-only", async () => {
+      const { nonAdmin, minting } = await deployFixture();
       await assert.rejects(
         minting.connect(nonAdmin).setPauserRole(nonAdmin.address),
-        (err) => err.message.includes("NotAdmin"),
-      );
-      await assert.rejects(
-        minting.connect(nonAdmin).setWrappedNative(await weth.getAddress()),
         (err) => err.message.includes("NotAdmin"),
       );
     });

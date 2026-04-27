@@ -1,6 +1,12 @@
-const { ethers, upgrades } = require("hardhat");
+const { ethers, upgrades, network } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
+
+// MockERC20 must never be deployed to a real production network — minting to
+// deployer is unrestricted and deploying these tokens on mainnet would brick
+// state (real users could be tricked into transacting against fake collateral).
+// Restrict to local and BSC Testnet only.
+const ALLOWED_MOCK_NETWORKS = ["hardhat", "localhost", "bscTestnet"];
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -50,6 +56,13 @@ async function main() {
 
   // ── 3. Mock Collaterals ──
   console.log("\n── 3. Collaterals ──");
+  if (!ALLOWED_MOCK_NETWORKS.includes(network.name)) {
+    throw new Error(
+      `MockERC20 deployment forbidden on network "${network.name}". ` +
+      `Allowed networks: ${ALLOWED_MOCK_NETWORKS.join(", ")}. ` +
+      `On production networks, wire real collateral token addresses into the config instead.`
+    );
+  }
   const MockERC20 = await ethers.getContractFactory("MockERC20");
   for (const name of ["USDT", "USDC", "WETH", "BTC", "BNB"]) {
     const mock = await MockERC20.deploy(name, name, 18);
