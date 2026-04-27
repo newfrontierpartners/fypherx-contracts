@@ -146,6 +146,10 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     mapping(uint256 => uint256) public redeemedPerBlock;                     // slot 12
 
     uint256 public stablesDeltaLimit;                                       // slot 13
+    /// @dev Legacy global kill switch. Kept for backward compatibility +
+    ///      emergency global stop. New per-asset granularity (ADR-008)
+    ///      lives in {mintPaused} + {burnPaused} below; either gate
+    ///      tripping is sufficient to block the action.
     bool public mintRedeemDisabled;                                         // slot 14
 
     // ── Storage append (April P0 patch) ──
@@ -169,6 +173,32 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
      *         enforcement.
      */
     mapping(address => mapping(uint256 => uint256)) public redeemedPerAssetPerBlock; // slot 17
+
+    // ── S1.2 / ADR-008 — appended slots, storage-layout safe ──
+
+    /// @notice ADR-007 §"Pauser carve-out". Latency-critical role that can
+    ///         only call {setMintPaused}. Pauser cannot mint, transfer,
+    ///         migrate, or unpause. Unpause requires admin (multisig).
+    address public pauserRole;
+
+    /// @notice ADR-008 per-asset mint pause. `mintPaused[asset] = true`
+    ///         blocks {mint} (and the {mintWETH} branch when the asset
+    ///         resolves to {wrappedNative}). Existing redeem flow is
+    ///         migrating to FypherBurnQueue (S1.1) and is not gated here.
+    mapping(address => bool) public mintPaused;
+
+    /// @notice Reserved for future per-asset burn pause if FypherMinting
+    ///         keeps a redeem path. Today FypherBurnQueue owns burn pause
+    ///         (see ADR-008 §FypherBurnQueue.burnPaused).
+    mapping(address => bool) public burnPaused;
+
+    // NOTE: an additional `wrappedNative` slot was reserved in an earlier
+    // S1.2 draft for {mintWETH}. Per the post-merge resolution with
+    // origin/main's April-audit patches, {mintWETH} is permanently
+    // deprecated (reverts {DeprecatedFunction}). The wrappedNative slot
+    // is intentionally NOT declared here so the proxy storage tail stays
+    // tight; future appended slots should start immediately after
+    // {burnPaused}.
 
     // ── Events ──
     event Mint(
@@ -197,11 +227,17 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     event MaxMintPerBlockUpdated(uint256 newLimit);
     event MaxRedeemPerBlockUpdated(uint256 newLimit);
     event MintRedeemToggled(bool disabled);
+    // S1.2 events
+    event PauserRoleUpdated(address indexed oldPauser, address indexed newPauser);
+    event MintPausedSet(address indexed asset, bool paused);
+    event BurnPausedSet(address indexed asset, bool paused);
 
     // ── Errors ──
     error NotAdmin();
     error NotExecutor();
+    error NotPauserOrAdmin();
     error MintRedeemDisabled();
+    error MintPausedForAsset();
     error InvalidSignature();
     error InvalidNonce();
     error ExpiredOrder();
@@ -253,8 +289,25 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         _;
     }
 
+    /// @notice S1.2 / ADR-007: pauser EOA OR admin (multisig) can pause.
+    ///         Unpause requires admin only — enforced inside {setMintPaused}.
+    modifier onlyPauserOrAdmin() {
+        if (msg.sender != pauserRole && !settingManagement.hasRole(bytes32(0), msg.sender)) {
+            revert NotPauserOrAdmin();
+        }
+        _;
+    }
+
     modifier whenMintRedeemEnabled() {
         if (mintRedeemDisabled) revert MintRedeemDisabled();
+        _;
+    }
+
+    /// @notice S1.2 / ADR-008: per-asset mint pause + legacy global gate.
+    ///         Either tripping is sufficient to revert.
+    modifier whenMintAllowed(address asset) {
+        if (mintRedeemDisabled) revert MintRedeemDisabled();
+        if (mintPaused[asset]) revert MintPausedForAsset();
         _;
     }
 
@@ -263,7 +316,7 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         Order calldata order,
         Route calldata route,
         bytes calldata signature
-    ) external nonReentrant whenMintRedeemEnabled {
+    ) external nonReentrant whenMintAllowed(order.collateral_asset) {
         if (order.collateral_amount == 0 || order.rusd_amount == 0) revert InvalidAmount();
         if (order.beneficiary == address(0)) revert ZeroAddress();
         if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
@@ -711,5 +764,41 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     function disableMintRedeem(bool disabled) external onlyAdmin {
         mintRedeemDisabled = disabled;
         emit MintRedeemToggled(disabled);
+    }
+
+    // ── S1.2 / ADR-008 admin ──
+
+    /**
+     * @notice Per-asset mint pause. ADR-007 §"Pauser carve-out" + ADR-008.
+     *         Pausing (paused=true) is callable by the {pauserRole} EOA
+     *         OR an admin (multisig). Unpausing (paused=false) is admin-only
+     *         — the asymmetric authorization defaults to "stop" under
+     *         operational uncertainty.
+     */
+    function setMintPaused(address asset, bool paused) external onlyPauserOrAdmin {
+        if (!paused) {
+            // Unpause requires admin (multisig) only.
+            if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
+        }
+        mintPaused[asset] = paused;
+        emit MintPausedSet(asset, paused);
+    }
+
+    /**
+     * @notice Per-asset burn pause for any future redeem path that lands
+     *         back in this contract. The active Phase 1 burn flow is in
+     *         FypherBurnQueue (S1.1) which has its own burnPaused mapping.
+     */
+    function setBurnPaused(address asset, bool paused) external onlyPauserOrAdmin {
+        if (!paused) {
+            if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
+        }
+        burnPaused[asset] = paused;
+        emit BurnPausedSet(asset, paused);
+    }
+
+    function setPauserRole(address newPauser) external onlyAdmin {
+        emit PauserRoleUpdated(pauserRole, newPauser);
+        pauserRole = newPauser;
     }
 }
