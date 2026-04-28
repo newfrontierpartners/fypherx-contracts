@@ -4,8 +4,14 @@
  * What this activates
  * ───────────────────
  * Per-asset {mintPaused[asset]} mapping (ADR-008) + the {pauserRole}
- * carve-out (ADR-007 §"Pauser carve-out") + the fixed mintWETH path
- * (msg.value validation + WETH wrap, replacing the silent-mint bug).
+ * carve-out (ADR-007 §"Pauser carve-out").
+ *
+ * Note on mintWETH: the original S1.2 draft also fixed the silent-
+ * mint bug in mintWETH (msg.value validation + WETH wrap). During
+ * the merge with main's April-audit branch, mintWETH was instead
+ * permanently deprecated (reverts DeprecatedFunction). The
+ * wrappedNative slot + setWrappedNative admin function were dropped
+ * with it. This script no longer attempts to wire wrappedNative.
  *
  * Until this upgrade lands, the live proxy at
  * 0x0Cc3De38A1ff577f23d14a4714530FCc11b24690 runs the pre-S1.2
@@ -47,15 +53,6 @@
  */
 const { ethers, upgrades } = require("hardhat");
 const addresses = require("./lib/addresses");
-
-// Wrapped-native addresses per chain — required by the new mintWETH
-// path. WBNB on BSC, WETH9 on Ethereum.
-const WBNB_BY_CHAIN = {
-  97:        "0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd", // BSC Testnet WBNB
-  56:        "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", // BSC Mainnet WBNB
-  11155111:  "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", // Sepolia WETH9
-  1:         "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // Ethereum mainnet WETH9
-};
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -120,21 +117,6 @@ async function main() {
     return `  ✓ set (was ${beforePauser === ethers.ZeroAddress ? "0x0" : beforePauser})`;
   });
 
-  // ── Wire up: setWrappedNative(WBNB-or-WETH) ──
-  const wrappedNative = WBNB_BY_CHAIN[chainId];
-  if (!wrappedNative) {
-    console.log(`  ✗ setWrappedNative skipped — chainId ${chainId} not in WBNB_BY_CHAIN`);
-    console.log("    Edit scripts/upgrade-minting-impl.js to add the wrapped-native address for this chain.");
-  } else {
-    await tryTx(`setWrappedNative(${wrappedNative})`, async () => {
-      const before = await upgraded.wrappedNative();
-      if (before.toLowerCase() === wrappedNative.toLowerCase()) return "  ✓ already set";
-      const tx = await upgraded.setWrappedNative(wrappedNative);
-      await tx.wait();
-      return `  ✓ set (was ${before === ethers.ZeroAddress ? "0x0" : before})`;
-    });
-  }
-
   // ── Summary ──
   const balAfter = await ethers.provider.getBalance(deployer.address);
   console.log("");
@@ -143,7 +125,6 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════");
   console.log(`  Proxy:           ${proxyAddr}`);
   console.log(`  pauserRole:      ${await upgraded.pauserRole()}`);
-  console.log(`  wrappedNative:   ${await upgraded.wrappedNative()}`);
   console.log("");
   console.log("Next steps");
   console.log("──────────");
