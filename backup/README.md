@@ -2,7 +2,7 @@
 
 Everything in this folder is **deliberately excluded from the alpha-launch audit scope**. The code is preserved here (with full git history) for two reasons:
 
-1. **On-chain reference.** Some of these contracts (LP, lending) are still deployed on BSC Testnet and may need future redeployment / migration; keeping the source close to the active tree avoids losing the implementations.
+1. **On-chain reference.** Some of these contracts (LP, lending) were deployed on BSC Testnet pre-2026-04-30 but were **not** included in the Sepolia migration (chainId 11155111). The BSC Testnet instances are stale and the Sepolia alpha stack has no LP/lending equivalent yet — keeping the source here lets a future phase redeploy without losing the implementations.
 2. **Future re-introduction.** The roadmap calls for LP, lend/borrow, and perpetual derivatives in later phases. When those phases ship, the source moves back into the active tree (with whatever revisions the next audit cycle requires) — it does not get rewritten from scratch.
 
 **No alpha contract imports anything from this folder.** The active build (`sotatek-smart-contracts/`) compiles cleanly without it. You can confirm by running `cd sotatek-smart-contracts && npx hardhat compile` from a clean `cache/`.
