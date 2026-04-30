@@ -26,3 +26,6 @@ contracts/typechain-types/
 
 /tmp/
 docs/benchmarks/raw/fypherx.env.snapshot
+
+# Local OMC plugin state
+.omc/
