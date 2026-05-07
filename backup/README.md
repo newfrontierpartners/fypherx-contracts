@@ -13,6 +13,7 @@ Everything in this folder is **deliberately excluded from the alpha-launch audit
 
 ```
 backup/
+├── irusd/     — Institutional fork (iRUSD / siRUSD / SIRUSDSilo)
 ├── lp/        — Pancake-V2-style liquidity vaults
 ├── lending/   — Morpho-Blue-style isolated lending markets
 ├── perps/     — Off-chain-matched perpetual derivatives Hardhat project
@@ -20,6 +21,20 @@ backup/
 ```
 
 ---
+
+## `irusd/` — Institutional fork (excluded)
+
+| File | Role |
+|---|---|
+| `InstitutionalRUSD.sol` | Institutional-only RUSD variant (iRUSD). Single-`_minter` slot; admin-set minter targets the institutional onboarding flow. |
+| `StakedIRUSD.sol` | ERC-4626 cooldown vault for iRUSD (siRUSD share token). Same cooldown pattern as `StakedRUSD` but with the institutional silo. |
+| `SIRUSDSilo.sol` | 3-param `withdraw(token, to, amount)` silo — escrow used during the iRUSD cooldown window. |
+
+**Reason for exclusion.** The alpha launch ships retail-only flows (RUSD / FYUSD / FYP). The institutional fork has no frontend or backend integration — it is deployed on BSC Testnet (`iRUSD` `0x6Abddeb8…`, `StakedIRUSD` `0x058A9E41…`, `iRUSDSilo` `0xc16CeD6A…`, `SIRUSDSilo` `0xDa251B73…`) but no user-facing path reaches it today. Re-introduction will follow institutional onboarding and a separate audit cycle.
+
+**No alpha contract imports the iRUSD trio.** Source-level mentions in `FYUSD.sol` and `SingleAdminAccessControl.sol` are NatSpec/comment context only. The legacy "two silos" arrangement on `StakedAUSD` (where `SIRUSDSilo` was a secondary institutional silo) has been retired; `StakedAUSD` now uses a single `RUSDSilo`-pattern silo.
+
+The legacy "deploy everything" script `scripts/deploy.js` was moved to [`backup/scripts/deploy-legacy-full.js`](./scripts/deploy-legacy-full.js) because it instantiates the iRUSD trio. The active alpha deploy entry points are `sotatek-smart-contracts/scripts/deploy-sepolia.js` (post-2026-04-30 migration) and `scripts/deploy-phase1.js`.
 
 ## `lp/` — Liquidity layer (excluded)
 

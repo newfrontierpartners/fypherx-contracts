@@ -8,7 +8,7 @@ This repository is the smart-contract codebase for the **alpha launch** of the F
 | Solidity | `0.8.22`, optimizer enabled, **runs = 1** |
 | Framework | Hardhat 2.28 + OpenZeppelin Contracts v5.0.2 + `@openzeppelin/hardhat-upgrades` |
 | Upgrade pattern | TransparentUpgradeableProxy (per major contract); proxy admin = deployer EOA |
-| In-scope files | 27 Solidity files / ~5,200 lines (incl. comments) |
+| In-scope files | 25 Solidity files / ~5,100 lines (incl. comments) |
 | Tests | 7 suites / 84 unit + invariant tests under `sotatek-smart-contracts/test/` |
 | Source of truth (addresses) | [`sotatek-smart-contracts/deployed-addresses.json`](./sotatek-smart-contracts/deployed-addresses.json) |
 
@@ -17,7 +17,7 @@ fypherx-contracts/
 ├── README.md                           ← you are here (audit overview)
 ├── sotatek-smart-contracts/            ← AUDIT TARGET
 │   ├── contracts/
-│   │   ├── Fypher/                     21 production contracts
+│   │   ├── Fypher/                     19 production contracts
 │   │   ├── interfaces/                 3 interfaces
 │   │   ├── libraries/                  1 library (PoolMath)
 │   │   └── mocks/                      2 test fixtures
@@ -35,7 +35,9 @@ fypherx-contracts/
 
 ## 1. What Fypher is, in one paragraph
 
-Fypher is a stablecoin and yield protocol built on BSC. End users deposit whitelisted ERC-20 collateral (USDT, USDC, WETH, BTC, BNB) into the **`FypherMinting`** contract and receive **`RUSD`**, the protocol's native dollar-pegged stablecoin, on a 1-for-1 basis after a backend-signed quote is verified on-chain. RUSD can be staked for **`StakedRUSD` (sRUSD)** to earn yield, or converted into **`FYUSD`** — a yield-bearing stablecoin whose underlying capital is custodied by Bitgo Prime and farmed against the **Concrete protocol** for off-chain yield. **`FYP`** is the protocol's governance token; staking sRUSD or FYUSD into the **`FypherStakingHub`** mints `FYP` rewards on a per-block emission schedule. **`InstitutionalRUSD` (iRUSD)** and its companion **`StakedIRUSD`** are an institutional-only fork of the same flow with the same cooldown semantics. Finally, the **`FypherCircuitBreaker`** is registered as the per-asset / per-phase pauser on every Phase 1 contract and acts as the single emergency-response surface for ops.
+Fypher is a stablecoin and yield protocol built on BSC. End users deposit whitelisted ERC-20 collateral (USDT, USDC, WETH, BTC, BNB) into the **`FypherMinting`** contract and receive **`RUSD`**, the protocol's native dollar-pegged stablecoin, on a 1-for-1 basis after a backend-signed quote is verified on-chain. RUSD can be staked for **`StakedRUSD` (sRUSD)** to earn yield, or converted into **`FYUSD`** — a yield-bearing stablecoin whose underlying capital is custodied by Bitgo Prime and farmed against the **Concrete protocol** for off-chain yield. **`FYP`** is the protocol's governance token; staking sRUSD or FYUSD into the **`FypherStakingHub`** mints `FYP` rewards on a per-block emission schedule. Finally, the **`FypherCircuitBreaker`** is registered as the per-asset / per-phase pauser on every Phase 1 contract and acts as the single emergency-response surface for ops.
+
+> **Out of alpha scope.** The institutional fork — `InstitutionalRUSD` (iRUSD), `StakedIRUSD` (siRUSD), `SIRUSDSilo` — has been moved to [`backup/irusd/`](./backup/irusd/) for the alpha audit. Those contracts are deployed on BSC Testnet but are not exercised by any user-facing flow in the alpha launch. Re-introduction will follow institutional onboarding and a separate audit cycle.
 
 ---
 
@@ -45,16 +47,30 @@ Fypher is a stablecoin and yield protocol built on BSC. End users deposit whitel
 
 All files under `sotatek-smart-contracts/contracts/`:
 
-#### 2.1 Tokens (4)
+#### 2.1 Tokens (3 base + 2 vault receipt + 3 staked-receipt)
+
+**Base tokens (3, in scope as standalone contracts):**
 
 | Contract | Purpose | Upgradeable | Decimals | Initial supply |
 |---|---|---|---|---|
 | `RUSD.sol` | Primary dollar-pegged stablecoin | ✓ TransparentProxy | 18 | 0; minted by `FypherMinting` only |
 | `FYUSD.sol` | Yield-bearing stablecoin (Bitgo + Concrete backed) | ✓ | 18 | 0; minted by `FyusdEpochSettlement` only |
 | `FYP.sol` | Governance token (pausable, burnable) | ✓ | 18 | Minted at deploy to deployer; FYP treasury distributes via `FypherStakingHub.fundFpy()` |
-| `InstitutionalRUSD.sol` | Institutional-only RUSD variant (iRUSD) | ✓ | 18 | 0; minted by an admin-set institutional minter |
 
-All four use ERC20Permit (EIP-2612) and ERC20Pausable. RUSD and FYUSD also expose a single-minter slot guarded by `SingleAdminAccessControl`; the slot can only be reassigned by the admin, and emits `MinterUpdated` so off-chain audit indexers can track every reassignment.
+All three use ERC20Permit (EIP-2612) and ERC20Pausable. RUSD and FYUSD also expose a single-minter slot guarded by `SingleAdminAccessControl`; the slot can only be reassigned by the admin, and emits `MinterUpdated` so off-chain audit indexers can track every reassignment.
+
+**Vault receipt tokens (2, ERC4626 share tokens minted by the yield vaults):**
+
+| Symbol | Underlying | Mint contract | NAV mechanism |
+|---|---|---|---|
+| `vFYUSD` | FYUSD | `FyusdYieldVault.sol` | Per-share NAV grows as `IConcreteAdapter.totalAssets()` accrues yield. Cooldown 7 days (admin-tunable via `vFyusdCooldown` pool config). |
+| `vRUSD` | RUSD | `RUSDYieldVault.sol` | Same model as vFYUSD, dedicated adapter binding. Cooldown 14 days (admin-tunable via `vRusdCooldown` pool config). |
+
+Both vTokens are full ERC20Permit + ERC20Pausable. They are transferable, composable as collateral elsewhere in DeFi, and share-count-stable (yield = NAV growth, not share inflation).
+
+**Staked receipt tokens (3, ERC4626 share tokens — see §2.3):** `sRUSD`, `stAUSD` (= staked FYUSD, legacy name), `sFYP`.
+
+The institutional `InstitutionalRUSD` (iRUSD) token has been moved to [`backup/irusd/`](../backup/irusd/) and is not part of the alpha audit scope.
 
 #### 2.2 Mint / burn engine (2)
 
@@ -63,18 +79,19 @@ All four use ERC20Permit (EIP-2612) and ERC20Pausable. RUSD and FYUSD also expos
 | `FypherMinting.sol` | Off-chain-quoted, on-chain-verified collateral → RUSD swap. EIP-712 typed signatures with `OrderType` (MINT \| REDEEM) bound into the digest. Per-block per-asset rate limits. Whitelisted custodian routing. |
 | `FypherBurnQueue.sol` | 7-day-delayed RUSD → collateral redemption. Burns RUSD immediately on request, releases collateral after `BURN_DELAY_SECONDS = 7 days`. Backend-signed quotes prevent front-running of asset/amount. |
 
-#### 2.3 Staking — 7-day cooldown vaults (4 + 2 silos)
+#### 2.3 Staking — 7-day cooldown vaults (3 + 1 silo)
 
 ERC-4626 vaults; depositors receive shares (s* tokens) that are non-transferable during cooldown. Withdrawals run through a silo escrow:
 
 | Vault | Underlying | Silo |
 |---|---|---|
 | `StakedRUSD.sol` (sRUSD) | RUSD | `RUSDSilo.sol` |
-| `StakedAUSD.sol` (stAUSD) | FYUSD | `RUSDSilo` (regular) + `SIRUSDSilo` (institutional) |
-| `StakedIRUSD.sol` (siRUSD) | iRUSD | `SIRUSDSilo.sol` |
+| `StakedAUSD.sol` (stAUSD) | **FYUSD** (legacy name; underlying is FYUSD) | `RUSDSilo.sol` |
 | `StakedFYP.sol` (sFYP) | FYP | `RUSDSilo.sol` |
 
-The two silo contracts are intentionally minimal — they hold tokens during the 7-day window and only allow `withdraw` calls from the staking vault that deployed them. They have no proxy, no storage, no admin; this is by design (they are pure escrows).
+The silo contract is intentionally minimal — it holds tokens during the 7-day window and only allows `withdraw` calls from the staking vault that deployed it. It has no proxy, no storage, no admin; this is by design (it is a pure escrow).
+
+> **Note on `StakedAUSD`.** Despite the contract name, the underlying asset is **FYUSD** (see `__ERC4626_init(_fyusd)` in `initialize`). The "AUSD" name is a legacy artifact retained because the BSC Testnet proxy is already deployed at this implementation. The companion institutional vault `StakedIRUSD` (siRUSD) and its silo `SIRUSDSilo` are out of alpha scope (see [`backup/irusd/`](../backup/irusd/)).
 
 #### 2.4 FYP emission staking hub (1)
 
@@ -84,14 +101,17 @@ The two silo contracts are intentionally minimal — they hold tokens during the
 
 The `FypherStakingHub` is independent of the per-token cooldown vaults above — users stake the *vault share token* (`sRUSD`/`stAUSD`) into the hub to earn FYP. There is no cooldown on the hub itself; cooldown is enforced at the underlying vault layer.
 
-#### 2.5 FYUSD yield system (4)
+#### 2.5 Yield-vault system — Concrete-backed (5)
 
 | Contract | Purpose |
 |---|---|
 | `FyusdEpochSettlement.sol` | Get-FYUSD flow. Users deposit collateral during an `OPEN` epoch with a backend-signed quote; backend custodian deposits to Bitgo Prime; once Bitgo confirms, executor mints FYUSD pro-rata to depositors against the deposited collateral. State machine: `OPEN → LOCKED → SETTLED → DISTRIBUTED`, plus `CANCELLED` for SLA breach. |
-| `FyusdYieldVault.sol` | User entry point to the Concrete-backed FYUSD yield. Users deposit FYUSD, receive shares 1:1 with the underlying adapter's shares. The vault layer exists to (a) isolate per-user accounting from the protocol's adapter balance, (b) provide a single ops pause switch (`vaultPaused`), (c) allow the underlying adapter to be migrated without changing the user-facing address. |
-| `IConcreteAdapter.sol` | Adapter interface — `asset()`, `totalAssets()`, `shareOf()`, `realizedYield7d()`, `deposit()`, `withdraw()`. |
-| `ConcreteAdapterV1.sol` | Mainnet binding to the Concrete protocol vault. **All methods currently revert `NotImplemented`** — this is a stub awaiting the Concrete protocol's mainnet metadata (per ADR-006). On BSC Testnet the vault uses `MockConcreteAdapter` instead. The contract is in scope so the auditor can review the interface and the eventual binding shape, but the implementation will land in a follow-up PR coordinated with Concrete. |
+| `FyusdYieldVault.sol` (vFYUSD) | ERC4626 receipt-token vault for the Concrete-backed FYUSD yield strategy. Users deposit FYUSD, receive `vFYUSD` shares whose per-share NAV grows as the adapter accrues yield. Withdrawals go through a 7-day (admin-tunable) cooldown queue + `RUSDSilo`-pattern escrow; direct `withdraw`/`redeem` revert. |
+| `RUSDYieldVault.sol` (vRUSD) | ERC4626 receipt-token vault for the Concrete-backed RUSD yield strategy — mirror of `FyusdYieldVault` for the RUSD asset. 14-day cooldown default. |
+| `IConcreteAdapter.sol` | Asset-agnostic adapter interface — `asset()`, `totalAssets()`, `shareOf()`, `realizedYield7d()`, `deposit()`, `withdraw()`. One adapter instance per (vault, asset) binding (separate FYUSD adapter and RUSD adapter on mainnet). |
+| `ConcreteAdapterV1.sol` | Mainnet binding to the Concrete protocol vault. **All state-changing methods currently revert `NotImplemented`** — this is a stub awaiting the Concrete protocol's mainnet metadata (per ADR-006). On BSC Testnet both vaults use `MockConcreteAdapter` (one instance per asset) instead. The contract is in scope so the auditor can review the interface and the eventual binding shape, but the implementation will land in a follow-up PR coordinated with Concrete. |
+
+**Cooldown invariant.** Both yield vaults enforce a single exit path: `cooldownAssets`/`cooldownShares` → silo escrow → `unstake` after `cooldownEnd`. The cooldown duration is read live from `SettingManagement.getPoolConfigs(...)` so admin can tune `vFyusdCooldown` (default 7 d) and `vRusdCooldown` (default 14 d) independently without redeploying the vaults.
 
 #### 2.6 System / config / safety (4)
 
@@ -107,8 +127,8 @@ The `FypherStakingHub` is independent of the per-token cooldown vaults above —
 | File | Purpose |
 |---|---|
 | `interfaces/ISettingManagement.sol` | Public read interface to `SettingManagement` — every other contract reads from here. |
-| `interfaces/IStakedRUSD.sol`, `IStakedRUSDCooldown.sol` | Interfaces consumed by the silo + `FYUSD` cross-vault flow. |
-| `libraries/PoolMath.sol` | Shared math helpers for ERC-4626 cooldown vaults (RUSD, AUSD, IRUSD, FYP). 45 lines, no external calls. |
+| `interfaces/IStakedRUSD.sol`, `IStakedRUSDCooldown.sol` | Interfaces consumed by the silo + cooldown vault flow. |
+| `libraries/PoolMath.sol` | Shared math helpers for ERC-4626 cooldown vaults (RUSD, AUSD, FYP). 45 lines, no external calls. |
 
 #### 2.8 Test fixtures (2)
 
@@ -161,16 +181,15 @@ See [`backup/README.md`](./backup/README.md) for the full inventory and the rati
                                 └──────────────┘                     │
                                                                      │
   Cooldown vaults (ERC-4626, 7-day):                                 │
-  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌────────────┐  │
-  │ StakedRUSD │   │ StakedAUSD │   │StakedIRUSD │   │ StakedFYP  │◄─┘
-  │ (sRUSD)    │   │ (stAUSD)   │   │ (siRUSD)   │   │ (sFYP)     │
-  └─────┬──────┘   └─────┬──────┘   └─────┬──────┘   └─────┬──────┘
-        │ withdraw       │ withdraw       │ withdraw       │ withdraw
-        ▼ via            ▼ via            ▼ via            ▼ via
-  ┌────────────┐   ┌────────────┐   ┌────────────┐   ┌────────────┐
-  │ RUSDSilo   │   │ RUSDSilo + │   │ SIRUSDSilo │   │ RUSDSilo   │
-  │            │   │ SIRUSDSilo │   │            │   │            │
-  └────────────┘   └────────────┘   └────────────┘   └────────────┘
+  ┌────────────┐   ┌────────────┐   ┌────────────┐                   │
+  │ StakedRUSD │   │ StakedAUSD │   │ StakedFYP  │◄──────────────────┘
+  │ (sRUSD)    │   │ = stFYUSD  │   │ (sFYP)     │
+  └─────┬──────┘   └─────┬──────┘   └─────┬──────┘
+        │ withdraw       │ withdraw       │ withdraw
+        ▼ via            ▼ via            ▼ via
+  ┌────────────┐   ┌────────────┐   ┌────────────┐
+  │ RUSDSilo   │   │ RUSDSilo   │   │ RUSDSilo   │
+  └────────────┘   └────────────┘   └────────────┘
 
   Safety:
   ┌──────────────────────────┐
@@ -369,21 +388,55 @@ On BSC Testnet the adapter is `MockConcreteAdapter` (returns a fixed APY). On ma
 
 Auditor note: the `realizedYield7d()` is a *display-only* read used by the customer frontend to show a 7-day APY estimate. It does not influence accounting; only `totalAssets()` and `shareOf(user)` matter for share/asset conversion.
 
-### 4.5 Cooldown staking (sRUSD / stAUSD / siRUSD / sFYP)
+### 4.4½ Vault deposit / cooldown (vFYUSD / vRUSD)
 
-All four ERC-4626 vaults follow the same pattern:
+Mirror of the staking-vault flow, with the underlying held in the Concrete adapter rather than directly in the vault:
+
+```
+User wallet                    FyusdYieldVault                 IConcreteAdapter
+   │  deposit(assets, recv)       │                                 │
+   │ ──────────────────────────►  │  pull FYUSD                     │
+   │                              │  ──────────────────────────►   │  adapter.deposit
+   │                              │                                 │
+   │  ◄────────────  vFYUSD mint  │                                 │
+   │  (shares = assets / NAV)     │                                 │
+   │                              │                                 │
+   │  ... time passes; adapter accrues yield ...                    │
+   │                              │                                 │
+   │  cooldownAssets(X)           │                                 │
+   │ ──────────────────────────►  │  burn vFYUSD shares             │
+   │                              │  ──────────────────────────►   │  adapter.withdraw(shares)
+   │                              │  ◄──────── FYUSD ─────────      │
+   │                              │  → silo (escrow during cooldown)│
+   │                              │                                 │
+   │  ... cooldown elapses ...    │                                 │
+   │                              │                                 │
+   │  unstake(receiver)           │  silo.withdraw(receiver, X)     │
+   │  ◄──────── FYUSD ──────────  │                                 │
+```
+
+`RUSDYieldVault` follows the same shape with `RUSD` as the asset. Auditor focus areas:
+
+- The `_withdraw` ERC4626 hook is overridden to revert — direct exit must not be possible. Any path that ends up in OZ's `_withdraw` is a bug.
+- Vault `totalSupply` MUST equal `adapter.shareOf(vault)` invariant: every `_deposit` mints both 1:1; every `_exitToCooldown` burns both 1:1. Verify no path mints/burns one without the other.
+- `_exitToCooldown` calls `adapter.withdraw(shares)` and asserts the FYUSD returned ≥ the user's expected `assets`. Slippage > 0 wei reverts (`AdapterReturnedShort`); the audit should consider whether a malicious adapter v2 could under-pay and what the migration story is (see `setAdapter`).
+- Cooldown duration is admin-mutable via `SettingManagement.setPoolConfigs(key, seconds)`. New cooldown entries pick up the change on the next call; existing entries' `cooldownEnd` is never retro-shortened (`_accrueCooldown` only extends forward).
+
+### 4.5 Cooldown staking (sRUSD / stAUSD / sFYP)
+
+All three ERC-4626 vaults follow the same pattern:
 
 1. `deposit(assets, receiver)` — deposits the underlying token, mints shares.
 2. `cooldownAssets(assets)` (or `cooldownShares(shares)`) — moves the user's shares into a 7-day "cooling" state and transfers the underlying tokens out of the vault into the silo.
 3. `unstake(receiver)` — after `cooldownEnd`, transfers tokens from the silo to `receiver`. Reverts if cooldown not yet elapsed.
 
-The two silo contracts (`RUSDSilo`, `SIRUSDSilo`) are intentionally minimal:
+The silo contract `RUSDSilo` is intentionally minimal:
 
 - No proxy, no admin, no storage other than the vault address (immutable in the constructor).
-- Only the vault that deployed them can call `withdraw(token, amount, to)`.
-- No emergency-recover function — if a silo holds an asset that should not be there (e.g. a stuck transfer), the only path to recover is via the vault that owns it.
+- Only the vault that deployed it can call `withdraw(to, amount)`.
+- No emergency-recover function — if the silo holds an asset that should not be there (e.g. a stuck transfer), the only path to recover is via the vault that owns it.
 
-**StakedAUSD (stAUSD) special case.** stAUSD has *two* silos (`RUSDSilo` for retail and `SIRUSDSilo` for institutional) because the cooldown semantics differ between retail FYUSD holders and institutional iRUSD holders depositing FYUSD on behalf of an institutional account. The silo selection happens in `cooldownAssets` based on whether the caller is in `settingManagement.institutionalAccounts()`. Auditor should verify the institutional bypass cannot be tricked by an unauthorized account.
+**StakedAUSD (stAUSD) note.** Despite the legacy `AUSD` name, the underlying asset is **FYUSD** (`__ERC4626_init(_fyusd)` in `initialize`). The vault uses a single `RUSDSilo`-pattern silo (constructor-set `silo` address). The historical "two silos" arrangement (retail + institutional) has been retired together with the iRUSD trio; the secondary silo `SIRUSDSilo` is preserved in [`backup/irusd/`](../backup/irusd/) but not part of the alpha audit.
 
 ### 4.6 FYP emission staking (FypherStakingHub)
 
@@ -465,10 +518,22 @@ Auditor focus:
 | **RUSD minter** | `FypherMinting` (sole) | Admin (via RUSD's `_setMinter`) | Mint RUSD. The slot is single-valued. |
 | **FYUSD minter** | `FyusdEpochSettlement` (sole) | Admin (via FYUSD's `_setMinter`) | Mint FYUSD. Single-valued. |
 | **FYP minter** | (none, post-deploy) | n/a | FYP is minted only at deploy. After that, FYP supply is fixed; emissions are paid out of `FypherStakingHub`'s funded balance. |
-| **Institutional minter** | (set per-deploy) | Admin | Mint iRUSD into the institutional flow. |
-| **iRUSD↔stAUSD bridge** | (set per-deploy) | Admin | Allows iRUSD holders to deposit FYUSD into stAUSD via the institutional silo. |
 
 The deployer EOA (`0x31B60b11533c97b5ED7b1B650D31855F3754Acb4`) currently holds Admin, Backend signer, Settlement executor, Watchdog, and proxy-admin authorities on BSC Testnet. **Migration to a Gnosis Safe multisig is a pre-mainnet TODO** documented in `docs/admin-model.md`.
+
+#### 5.1 Gnosis Safe compatibility
+
+Every governance / treasury / pause role in the alpha set is implemented via either an `Ownable` check (`_checkOwner`) or a `SettingManagement.hasRole(...)` check against `msg.sender`. Both work transparently when `msg.sender` is a Gnosis Safe (which calls into the target contract as itself); none of these contracts reads `tx.origin` and none requires the caller to produce an ECDSA signature. The recommended deployment topology for mainnet is therefore:
+
+| Tier | Holder | Roles |
+|---|---|---|
+| **Treasury Safe** (cold, ≥3-of-5 board) | Gnosis Safe | `SettingManagement` admin (`DEFAULT_ADMIN_ROLE`), every `ProxyAdmin.owner`, RUSD/FYUSD/FYP `owner`, RUSD/FYUSD `_minter` reassignment authority, `ReservePool` admin, fee receiver, custodian whitelist target. |
+| **Ops Safe** (warm, ≥2-of-3 ops) | Gnosis Safe | Day-to-day pool-config tuning (`setPoolConfigs("vFyusdCooldown", ...)` etc.), trigger registration on `FypherCircuitBreaker`, REWARDER_ROLE in staking vaults. |
+| **Hot EOAs** (HSM-backed, rotated) | EOA | Backend signer (EIP-712 quote signing), Settlement executor (`FyusdEpochSettlement.lockEpoch` / `settleEpoch`), Watchdog (`FypherCircuitBreaker.trip`). |
+
+**Why some roles must stay EOA.** `FypherMinting`, `FypherBurnQueue`, and `FyusdEpochSettlement` all call `ECDSA.recover` on the off-chain quote — Gnosis Safe addresses do not produce ECDSA signatures (they use EIP-1271 contract-wallet signatures), so a Safe cannot occupy those slots without first introducing `SignatureChecker` support. That migration is tracked but is a non-goal for the alpha audit; the current design keeps the signing key in an HSM-backed EOA so the loss surface is the HSM, not a multisig that humans approve into.
+
+The alpha contracts therefore impose **zero blockers** to a Safe-driven governance topology: all admin paths use plain `msg.sender` semantics, and the deployer can rotate every governance slot to the Treasury Safe in a single batch (see `docs/admin-model.md` for the rotation script).
 
 ---
 
@@ -487,7 +552,7 @@ All pre-existing slots (0..14) are untouched.
 
 The OZ Upgrades plugin's `unsafeAllow` flags are **not** used in production deploys (verified via the `bsc-testnet.json` registry under `sotatek-smart-contracts/.openzeppelin/`). Auditor should sanity-check the storage compatibility of any in-flight upgrade by running `npx hardhat run scripts/upgrade-{minting,fyusd}-impl.js --network bscTestnet` against a fresh proxy registry.
 
-**Non-upgradeable by design**: `RUSDSilo`, `SIRUSDSilo`, `ReservePool`, `ConcreteAdapterV1`, `MockConcreteAdapter`, `MockERC20`, `PoolMath`. Silos are minimal-trust escrows; ReservePool is a thin admin contract; the rest are libraries / mocks / stubs.
+**Non-upgradeable by design**: `RUSDSilo`, `ReservePool`, `ConcreteAdapterV1`, `MockConcreteAdapter`, `MockERC20`, `PoolMath`. The silo is a minimal-trust escrow; ReservePool is a thin admin contract; the rest are libraries / mocks / stubs.
 
 ---
 
@@ -502,7 +567,7 @@ The most recent internal audit is documented in [`audit/2026-04-20-post-p0-deep-
 | **Critical** | C-4 | `_distributeCollateral` did not validate custodian whitelist or ratio sum | `FypherMinting._distributeCollateral` — whitelist check + 10_000 bps sum check |
 | **Critical** | (mintWETH) | `mintWETH` minted RUSD without transferring collateral | `FypherMinting.mintWETH` — `revert DeprecatedFunction()` |
 | Medium | M-7 | No per-block per-asset rate limiting on mint or redeem | Slots 16, 17 added; `_checkRateLimit` invoked on both flows |
-| Low | L-3 | Reserved-but-unused storage slots in `StakedIRUSD` | Documented; not exploitable |
+| Low | L-3 | Reserved-but-unused storage slots in `StakedIRUSD` (out of alpha scope; preserved in `backup/irusd/`) | Documented; not exploitable |
 | Low | L-5 | `MinterUpdated` event missing on RUSD minter rotations | Added |
 | Low | L-6 | `OwnerInitialized` event missing | Added |
 
@@ -562,8 +627,8 @@ Tests run on the in-memory Hardhat network. There are no on-chain tests in CI �
 The audit does not need to redeploy, but the scripts are listed here for completeness:
 
 ```bash
-npx hardhat run scripts/deploy-bsc-testnet.js   --network bscTestnet
-npx hardhat run scripts/deploy-phase1.js        --network bscTestnet
+npx hardhat run scripts/deploy-sepolia.js       --network sepolia    # primary alpha target (post-2026-04-30)
+npx hardhat run scripts/deploy-phase1.js        --network sepolia
 node scripts/setup-custodian.js                 # configures custodian whitelist post-deploy
 node scripts/bootstrap-fpy-treasury.js          # funds FypherStakingHub with FPY
 ```
@@ -587,17 +652,13 @@ The full registry is in [`sotatek-smart-contracts/deployed-addresses.json`](./so
 | `RUSD` (proxy) | `0xF3ac96da1edD17bb0e803Ad1d1c9Cbc18b42FaB5` |
 | `FYUSD` (proxy) | `0x3b1f4CA20fCDf837d89b3606900a4e60C3fba6EE` |
 | `FYP` (proxy) | `0x8Ac0e5C2B3670F78039A7Ea19C9a79Ef28c65a4C` |
-| `iRUSD` (proxy) | `0x6Abddeb89854bc477D680c431C18979227c64480` |
 | `FypherMinting` (proxy) | `0x0Cc3De38A1ff577f23d14a4714530FCc11b24690` |
 | `FypherBurnQueue` (proxy) | `0xDb7a81FC773C9359d02ee1F1DD18F0e41063d2c4` |
 | `ReservePool` | `0x9DDac07079537159765A6e083b1BB3A2fcFB84bB` |
 | `StakedRUSD` (proxy) | `0xd7c0921c1a18BeBEE74F9E88BF1d035Ac77b1db6` |
 | `RUSDSilo` | `0x78F42c44B94Af3692b5cD7105d50894B5da3Bc75` |
-| `StakedIRUSD` (proxy) | `0x058A9E41aF4aBbd7cc4dA1951581184291ED9609` |
-| `iRUSDSilo` | `0xc16CeD6A317E8Ad50C36484aa6caA3fA4042C658` |
 | `StakedAUSD` (stAUSD, proxy) | `0xa9401313d8DFe2FE302431A208DEFCde058E9D52` |
 | `stAUSDSilo` | `0x5Df79Bd61f49a7D55E38bCAcfdFa1dCe309e63B7` |
-| `SIRUSDSilo` | `0xDa251B730F80E03Fc22B71dd392d561A65a818e6` |
 | `StakedFYP` (proxy) | `0xb43404C7Dc934743BdbFd3821617d0add6eFeBcA` |
 | `FYPSilo` | `0x5143e509911b3A9351D25dDf9d8724AFAe1E3511` |
 | `FypherStakingHub` (proxy) | `0x6323bbD14C51F69a27D69D53626d8D7b37196F64` |
