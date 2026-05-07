@@ -627,8 +627,8 @@ Tests run on the in-memory Hardhat network. There are no on-chain tests in CI â€
 The audit does not need to redeploy, but the scripts are listed here for completeness:
 
 ```bash
-npx hardhat run scripts/deploy-bsc-testnet.js   --network bscTestnet
-npx hardhat run scripts/deploy-phase1.js        --network bscTestnet
+npx hardhat run scripts/deploy-sepolia.js       --network sepolia    # primary alpha target (post-2026-04-30)
+npx hardhat run scripts/deploy-phase1.js        --network sepolia
 node scripts/setup-custodian.js                 # configures custodian whitelist post-deploy
 node scripts/bootstrap-fpy-treasury.js          # funds FypherStakingHub with FPY
 ```

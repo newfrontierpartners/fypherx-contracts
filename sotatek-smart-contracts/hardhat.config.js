@@ -15,10 +15,14 @@ module.exports = {
       chainId: 97,
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
     },
+    sepolia: {
+      url: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
+      chainId: 11155111,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
   },
   etherscan: {
-    apiKey: {
-      bscTestnet: process.env.BSCSCAN_API_KEY || "",
-    },
+    // Etherscan V2 unified key — one API key works across BSCScan, Etherscan, etc.
+    apiKey: process.env.ETHERSCAN_API_KEY || process.env.BSCSCAN_API_KEY || "",
   },
 };

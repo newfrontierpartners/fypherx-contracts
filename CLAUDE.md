@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The repo is organized for an external security audit. There is **one canonical Hardhat project**:
 
-- **`sotatek-smart-contracts/`** — alpha-launch contracts: stablecoins (RUSD/FYUSD), governance token (FYP), ERC-4626 cooldown vaults (sRUSD/stAUSD/sFYP — note: stAUSD's underlying is FYUSD), mint engine, burn queue, FYUSD epoch settlement, FYUSD yield vault, FYP emission staking hub, circuit breaker, settings registry. Deployed on BSC Testnet (chainId 97). **Default to working here.**
+- **`sotatek-smart-contracts/`** — alpha-launch contracts: stablecoins (RUSD/FYUSD), governance token (FYP), ERC-4626 cooldown vaults (sRUSD/stAUSD/sFYP — note: stAUSD's underlying is FYUSD), ERC-4626 yield receipt vaults (vFYUSD/vRUSD, Concrete-backed), mint engine, burn queue, FYUSD epoch settlement, FYP emission staking hub, circuit breaker, settings registry. Deployed on Ethereum Sepolia (chainId 11155111) as of 2026-04-30 (migrated from BSC Testnet chainId 97). Address registry: `addresses/11155111.json`. **Default to working here.**
 
 Out-of-scope code lives in `backup/`:
 
@@ -70,7 +70,7 @@ Solidity **0.8.22**. Hardhat default paths (`sources: ./contracts`, `artifacts: 
 - `libraries/PoolMath.sol` — shared math for cooldown vaults
 - `mocks/MockERC20.sol`, `mocks/MockConcreteAdapter.sol` — test fixtures
 
-Each user-facing contract has a matching `test/*.test.js`. `scripts/deploy-bsc-testnet.js` is the production entry point; `scripts/deploy-phase1.js` runs the wiring after deploy. Upgrades are scripted per-contract (`scripts/upgrade-{minting,fyusd}-impl.js`).
+Each user-facing contract has a matching `test/*.test.js`. `scripts/deploy-sepolia.js` is the current production entry point (was `deploy-bsc-testnet.js` pre-2026-04-30); `scripts/deploy-phase1.js` runs the wiring after deploy. Upgrades are scripted per-contract (`scripts/upgrade-{minting,fyusd}-impl.js`).
 
 ## Networks & environment
 
@@ -78,14 +78,15 @@ Configured in `sotatek-smart-contracts/hardhat.config.js`:
 
 | Network | URL | Notes |
 |---|---|---|
-| `bscTestnet` | `https://data-seed-prebsc-1-s1.binance.org:8545` (chainId 97) | Production target for Phase 1 alpha |
+| `sepolia` | `https://ethereum-sepolia-rpc.publicnode.com` (chainId 11155111) | Production target for Phase 1 alpha (migrated 2026-04-30) |
+| `bscTestnet` | `https://data-seed-prebsc-1-s1.binance.org:8545` (chainId 97) | Legacy — pre-2026-04-30 deployment, no longer the active target |
 | `hardhat` (in-memory) | n/a | Tests run here |
 
 Required env (`.env` in `sotatek-smart-contracts/`):
 
 ```
 PRIVATE_KEY=0x...                  # deployer EOA
-BSCSCAN_API_KEY=...                # for source verification
+ETHERSCAN_API_KEY=...              # for source verification (single key covers Etherscan + BscScan)
 ```
 
 ⚠️ **Do not commit `.env`**, and confirm before any deploy that the key matches the intended environment.

@@ -28,7 +28,7 @@ async function main() {
   console.log("rusd              :", await minting.rusd());
   console.log("mintRedeemDisabled:", await minting.mintRedeemDisabled());
   console.log("globalMaxMint/block:", (await minting.globalMaxMintPerBlock()).toString());
-  for (const sym of ["USDT", "USDC", "BTC", "WETH", "BNB"]) {
+  for (const sym of ["USDT", "USDC", "WETH"]) {
     const addr = addrs[sym];
     if (!addr) continue;
     const ok = await minting.supportedAssets(addr);
@@ -37,8 +37,8 @@ async function main() {
 
   // Also check the tx sender's balance in case front-end pre-check is wrong.
   const USER = "0x3C886D7C56Ca228FB575aAaa4890C5dbB716eC99";
-  const bnb = await ethers.provider.getBalance(USER);
-  console.log(`\nuser ${USER} BNB: ${ethers.formatEther(bnb)}`);
+  const native = await ethers.provider.getBalance(USER);
+  console.log(`\nuser ${USER} native: ${ethers.formatEther(native)}`);
   for (const sym of ["USDT", "USDC"]) {
     const token = new ethers.Contract(addrs[sym], [
       "function balanceOf(address) view returns (uint256)",
