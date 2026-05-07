@@ -8,7 +8,7 @@ This repository is the smart-contract codebase for the **alpha launch** of the F
 | Solidity | `0.8.22`, optimizer enabled, **runs = 1** |
 | Framework | Hardhat 2.28 + OpenZeppelin Contracts v5.0.2 + `@openzeppelin/hardhat-upgrades` |
 | Upgrade pattern | TransparentUpgradeableProxy (per major contract); proxy admin = deployer EOA |
-| In-scope files | 25 Solidity files / ~5,100 lines (incl. comments) |
+| In-scope files | 26 Solidity files / ~5,700 lines (incl. comments) |
 | Tests | 7 suites / 84 unit + invariant tests under `sotatek-smart-contracts/test/` |
 | Source of truth (addresses) | [`sotatek-smart-contracts/deployed-addresses.json`](./sotatek-smart-contracts/deployed-addresses.json) |
 
@@ -17,7 +17,7 @@ fypherx-contracts/
 ├── README.md                           ← you are here (audit overview)
 ├── sotatek-smart-contracts/            ← AUDIT TARGET
 │   ├── contracts/
-│   │   ├── Fypher/                     19 production contracts
+│   │   ├── Fypher/                     20 production contracts
 │   │   ├── interfaces/                 3 interfaces
 │   │   ├── libraries/                  1 library (PoolMath)
 │   │   └── mocks/                      2 test fixtures
@@ -106,6 +106,7 @@ The `FypherStakingHub` is independent of the per-token cooldown vaults above —
 | Contract | Purpose |
 |---|---|
 | `FyusdEpochSettlement.sol` | Get-FYUSD flow. Users deposit collateral during an `OPEN` epoch with a backend-signed quote; backend custodian deposits to Bitgo Prime; once Bitgo confirms, executor mints FYUSD pro-rata to depositors against the deposited collateral. State machine: `OPEN → LOCKED → SETTLED → DISTRIBUTED`, plus `CANCELLED` for SLA breach. |
+| `FyusdEpochRedemption.sol` | **Mirror of FyusdEpochSettlement for the redemption flow** (ADR-011). Users escrow FYUSD during an OPEN epoch with a backend-signed quote; backend wires equivalent USDT/USDC out of Bitgo Prime to the executor EOA; on settle the executor pre-funds the contract with that collateral and the escrowed FYUSD is burned. Same OPEN/LOCKED/SETTLED/DISTRIBUTED/CANCELLED state machine; CANCELLED refunds escrowed FYUSD instead of paying collateral. Closes the FYUSD-redeem trap reported in fypherx-frontend #158. |
 | `FyusdYieldVault.sol` (vFYUSD) | ERC4626 receipt-token vault for the Concrete-backed FYUSD yield strategy. Users deposit FYUSD, receive `vFYUSD` shares whose per-share NAV grows as the adapter accrues yield. Withdrawals go through a 7-day (admin-tunable) cooldown queue + `RUSDSilo`-pattern escrow; direct `withdraw`/`redeem` revert. |
 | `RUSDYieldVault.sol` (vRUSD) | ERC4626 receipt-token vault for the Concrete-backed RUSD yield strategy — mirror of `FyusdYieldVault` for the RUSD asset. 14-day cooldown default. |
 | `IConcreteAdapter.sol` | Asset-agnostic adapter interface — `asset()`, `totalAssets()`, `shareOf()`, `realizedYield7d()`, `deposit()`, `withdraw()`. One adapter instance per (vault, asset) binding (separate FYUSD adapter and RUSD adapter on mainnet). |

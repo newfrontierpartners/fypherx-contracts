@@ -54,6 +54,7 @@ Solidity **0.8.22**. Hardhat default paths (`sources: ./contracts`, `artifacts: 
 
 ### Yield-vault system (Concrete-backed)
 - `Fypher/FyusdEpochSettlement.sol` — Get-FYUSD epoch state machine (OPEN/LOCKED/SETTLED/DISTRIBUTED/CANCELLED)
+- `Fypher/FyusdEpochRedemption.sol` — Redeem-FYUSD mirror per ADR-011; same state machine, FYUSD escrow → collateral payout
 - `Fypher/FyusdYieldVault.sol` (vFYUSD) — ERC4626 receipt vault, 7-day cooldown via `vFyusdCooldown` pool config
 - `Fypher/RUSDYieldVault.sol` (vRUSD) — ERC4626 receipt vault for RUSD, 14-day cooldown via `vRusdCooldown` pool config
 - `Fypher/IConcreteAdapter.sol` — asset-agnostic adapter interface (one instance per (vault, asset) binding)
