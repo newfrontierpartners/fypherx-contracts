@@ -23,6 +23,11 @@ contracts/typechain-types/
 .env
 .env.*
 !.env.example
+# Allow committed templates that follow the `.env.*.example` naming
+# convention — the matching `.env.*` (without `.example`) holds the
+# real secrets and stays ignored. See ADR-012 §5 for the dev-multisig
+# pair (.env.dev-multisig.example committed, .env.dev-multisig hot).
+!.env.*.example
 
 /tmp/
 docs/benchmarks/raw/fypherx.env.snapshot
