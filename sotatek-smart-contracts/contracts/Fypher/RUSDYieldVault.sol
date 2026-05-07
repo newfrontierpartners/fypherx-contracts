@@ -12,7 +12,7 @@ import "../interfaces/ISettingManagement.sol";
 import "./IConcreteAdapter.sol";
 import "./RUSDSilo.sol";
 
-interface IFYUSDPermit {
+interface IRUSDPermit {
     function permit(
         address owner,
         address spender,
@@ -25,35 +25,23 @@ interface IFYUSDPermit {
 }
 
 /**
- * @title FyusdYieldVault (vFYUSD)
- * @notice ERC4626 receipt-token vault for the Concrete-backed FYUSD yield
- *         strategy. Users deposit FYUSD, receive `vFYUSD` shares whose
- *         per-share NAV grows as the adapter accrues yield from the
- *         underlying Concrete protocol.
+ * @title RUSDYieldVault (vRUSD)
+ * @notice ERC4626 receipt-token vault for the Concrete-backed RUSD yield
+ *         strategy. Mirror of {FyusdYieldVault} for the RUSD asset; same
+ *         share-NAV mechanics, same cooldown pattern, same adapter
+ *         interface — only the underlying token and the cooldown config
+ *         key differ.
  *
- *         Withdrawal flow uses the same cooldown pattern as the cooldown
- *         staking vaults (StakedRUSD/StakedAUSD/StakedFYP):
- *
- *           1. {cooldownAssets} or {cooldownShares} burns vault shares,
- *              calls `adapter.withdraw` to pull FYUSD back into the vault,
- *              forwards FYUSD to the silo, and starts the cooldown timer.
- *           2. After the configurable cooldown window has elapsed, the
- *              user calls {unstake} to receive the held FYUSD from the
- *              silo.
- *
- *         Cooldown duration is read from {settingManagement} under the
- *         key `"vFyusdCooldown"` so ops can tune it (default 7 days)
+ *         Cooldown duration is read live from {settingManagement} under
+ *         the key `"vRusdCooldown"` so ops can tune it (default 14 days)
  *         without redeploying.
  *
- *         The vault holds NO active FYUSD between calls — every share is
- *         backed by a 1:1 adapter share. Cooldown FYUSD lives in the
- *         silo, not in this contract.
- *
- * @dev Upgradeable (TransparentProxy). Storage layout differs from the
- *      pre-launch implementation; the proxy must be redeployed at alpha
- *      launch (the previous BSC-Testnet proxy is dormant).
+ * @dev See {FyusdYieldVault} for the full design rationale. The two
+ *      contracts are kept as separate codebases (rather than a generic
+ *      base) because the audit firm prefers a flat, copy-paste-explicit
+ *      file per asset over inheritance graphs.
  */
-contract FyusdYieldVault is
+contract RUSDYieldVault is
     Initializable,
     ERC4626Upgradeable,
     ERC20PausableUpgradeable,
@@ -65,9 +53,9 @@ contract FyusdYieldVault is
 
     // ── Constants ──
     uint256 public constant SETTING_MANAGER_TIMELOCK = 2 days;
-    uint256 public constant DEFAULT_COOLDOWN = 7 days;
+    uint256 public constant DEFAULT_COOLDOWN = 14 days;
     /// @notice SettingManagement pool-config key for this vault's cooldown.
-    string  public constant COOLDOWN_CONFIG_KEY = "vFyusdCooldown";
+    string  public constant COOLDOWN_CONFIG_KEY = "vRusdCooldown";
 
     // ── Storage ──
     ISettingManagement public settingManagement;
@@ -77,9 +65,7 @@ contract FyusdYieldVault is
 
     mapping(address => UserCooldown) public cooldowns;
 
-    /// @notice Pending replacement for {settingManagement}, awaiting timelock.
     ISettingManagement public pendingSettingManagement;
-    /// @notice UNIX timestamp at which the pending replacement may be accepted.
     uint256            public pendingSettingManagerEta;
 
     // ── Events ──
@@ -111,28 +97,28 @@ contract FyusdYieldVault is
 
     function initialize(
         ISettingManagement _settingManagement,
-        IERC20 _fyusd,
+        IERC20 _rusd,
         IConcreteAdapter _adapter,
         address admin_
     ) external initializer {
         if (address(_settingManagement) == address(0)) revert ZeroAddress();
-        if (address(_fyusd) == address(0)) revert ZeroAddress();
+        if (address(_rusd) == address(0)) revert ZeroAddress();
         if (address(_adapter) == address(0)) revert ZeroAddress();
         if (admin_ == address(0)) revert ZeroAddress();
-        if (_adapter.asset() != address(_fyusd)) {
-            revert AdapterAssetMismatch(address(_fyusd), _adapter.asset());
+        if (_adapter.asset() != address(_rusd)) {
+            revert AdapterAssetMismatch(address(_rusd), _adapter.asset());
         }
         if (!_settingManagement.hasRole(bytes32(0), admin_)) revert AdminMismatch(admin_);
 
-        __ERC20_init("Vault FYUSD", "vFYUSD");
-        __ERC4626_init(_fyusd);
+        __ERC20_init("Vault RUSD", "vRUSD");
+        __ERC4626_init(_rusd);
         __ERC20Pausable_init();
-        __ERC20Permit_init("Vault FYUSD");
+        __ERC20Permit_init("Vault RUSD");
         __ReentrancyGuard_init();
 
         settingManagement = _settingManagement;
         adapter = _adapter;
-        silo = new RUSDSilo(address(this), _fyusd);
+        silo = new RUSDSilo(address(this), _rusd);
     }
 
     // ── Modifiers ──
@@ -150,43 +136,25 @@ contract FyusdYieldVault is
 
     // ── ERC4626 overrides ──
 
-    /// @notice Total FYUSD backing the vault — always equal to whatever the
-    ///         adapter currently controls on our behalf. The vault itself
-    ///         does NOT hold active FYUSD; cooldown balances are escrowed
-    ///         in the silo and excluded by construction.
     function totalAssets() public view override returns (uint256) {
         return adapter.totalAssets();
     }
 
-    /**
-     * @dev On deposit, forward the pulled assets straight to the adapter.
-     *      The adapter mints its own shares to this vault 1:1 with the
-     *      vToken supply (because both vault.totalSupply and
-     *      adapter.shareOf(vault) start from 0 and grow in lockstep with
-     *      the same NAV expansion).
-     */
     function _deposit(
         address caller,
         address receiver,
         uint256 assets,
         uint256 shares
     ) internal override {
-        IERC20 fyusd = IERC20(asset());
-        fyusd.safeTransferFrom(caller, address(this), assets);
-        fyusd.forceApprove(address(adapter), assets);
+        IERC20 rusd = IERC20(asset());
+        rusd.safeTransferFrom(caller, address(this), assets);
+        rusd.forceApprove(address(adapter), assets);
         adapter.deposit(assets);
         _mint(receiver, shares);
 
         emit Deposit(caller, receiver, assets, shares);
     }
 
-    /**
-     * @dev Direct {withdraw}/{redeem} (instant exit) is intentionally
-     *      disabled — every exit path must go through the cooldown
-     *      mechanism so the protocol gets the rate-limit benefit. We
-     *      block both by routing the OZ ERC4626 entry points through
-     *      our overrides, which always revert.
-     */
     function _withdraw(
         address /* caller */,
         address /* receiver */,
@@ -194,7 +162,7 @@ contract FyusdYieldVault is
         uint256 /* assets */,
         uint256 /* shares */
     ) internal pure override {
-        revert("vFYUSD: use cooldown flow");
+        revert("vRUSD: use cooldown flow");
     }
 
     function deposit(uint256 assets, address receiver)
@@ -219,11 +187,6 @@ contract FyusdYieldVault is
         return super.mint(shares, receiver);
     }
 
-    /**
-     * @notice Permit-flavoured deposit: lets the user provide an
-     *         off-chain ERC-2612 signature so they don't need a separate
-     *         {approve} transaction before depositing.
-     */
     function depositWithPermit(
         uint256 assets,
         address receiver,
@@ -233,47 +196,23 @@ contract FyusdYieldVault is
         bytes32 s
     ) external nonReentrant whenNotPaused returns (uint256) {
         if (assets == 0) revert ZeroAmount();
-        try IFYUSDPermit(asset()).permit(msg.sender, address(this), assets, deadline, v, r, s) {} catch {}
+        try IRUSDPermit(asset()).permit(msg.sender, address(this), assets, deadline, v, r, s) {} catch {}
         return super.deposit(assets, receiver);
     }
 
     // ── Cooldown ──
-    function cooldownAssets(uint256 assets)
-        external
-        override
-        nonReentrant
-        whenNotPaused
-    {
+    function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
         uint256 shares = previewWithdraw(assets);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
-    function cooldownShares(uint256 shares)
-        external
-        override
-        nonReentrant
-        whenNotPaused
-    {
+    function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
         uint256 assets = previewRedeem(shares);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
-    /**
-     * @dev Burn `shares` from `user`, withdraw the equivalent FYUSD from
-     *      the adapter, transfer it to the silo, and add `assets` to the
-     *      user's outstanding cooldown bucket.
-     *
-     *      Vault shares track adapter shares 1:1 (see {totalAssets}
-     *      docstring). We therefore call `adapter.withdraw(shares)` —
-     *      not `adapter.withdraw(assets)` — so the share-burn stays in
-     *      lockstep with the vToken burn.
-     *
-     *      The adapter MUST return at least `assets` FYUSD (its own
-     *      `previewRedeem`-equivalent matches ours). We verify defensively;
-     *      a short return signals an adapter accounting bug or NAV race.
-     */
     function _exitToCooldown(address user, uint256 assets, uint256 shares) internal {
         _burn(user, shares);
         uint256 received = adapter.withdraw(shares);
@@ -318,11 +257,6 @@ contract FyusdYieldVault is
         if (newAdapter.asset() != asset()) {
             revert AdapterAssetMismatch(asset(), newAdapter.asset());
         }
-        // Migration to a v2 adapter is intentionally NOT automated — admin
-        // must coordinate the asset move via an emergencyMigrate step
-        // before flipping the binding. This keeps the share-state
-        // invariant (totalSupply == adapter.shareOf(vault)) under the
-        // operator's control.
         emit AdapterUpdated(address(adapter), address(newAdapter));
         adapter = newAdapter;
     }
@@ -363,23 +297,14 @@ contract FyusdYieldVault is
     }
 
     // ── View ──
-
-    /// @notice Adapter-recorded share balance held by THIS vault. Should
-    ///         track {totalSupply} in lockstep; mismatch indicates a
-    ///         migration in flight or an adapter bug.
     function adapterShares() external view returns (uint256) {
         return adapter.shareOf(address(this));
     }
 
-    /// @notice Convenience pass-through; lets ops dashboards render a
-    ///         "7d realized APY" without a separate ABI call.
     function realizedYield7dBps() external view returns (uint256) {
         return adapter.realizedYield7d();
     }
 
-    /// @notice The cooldown duration currently applied to new cooldown
-    ///         entries (read live from SettingManagement so admin tweaks
-    ///         take effect on the next cooldownAssets call).
     function currentCooldownDuration() external view returns (uint256) {
         uint256 d = settingManagement.getPoolConfigs(COOLDOWN_CONFIG_KEY);
         return d == 0 ? DEFAULT_COOLDOWN : d;

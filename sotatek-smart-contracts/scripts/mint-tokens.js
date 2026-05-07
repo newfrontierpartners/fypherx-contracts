@@ -10,8 +10,6 @@ async function main() {
     { name: "USDT",  address: ADDRESSES.USDT },
     { name: "USDC",  address: ADDRESSES.USDC },
     { name: "WETH",  address: ADDRESSES.WETH },
-    { name: "BTC",   address: ADDRESSES.BTC },
-    { name: "BNB",   address: ADDRESSES.BNB },
     { name: "RUSD",  address: ADDRESSES.RUSD },
     { name: "FYP",   address: ADDRESSES.FYP },
     { name: "iRUSD", address: ADDRESSES.iRUSD },

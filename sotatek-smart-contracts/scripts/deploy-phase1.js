@@ -100,7 +100,7 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════");
   console.log(`Deployer:        ${deployer.address}`);
   const balance = await ethers.provider.getBalance(deployer.address);
-  console.log(`Balance:         ${ethers.formatEther(balance)} BNB`);
+  console.log(`Balance:         ${ethers.formatEther(balance)} (native)`);
   console.log("");
 
   // ── 1. Load existing addresses (must include SettingManagement, RUSD, FYUSD, FYP, USDT, USDC) ──
@@ -323,7 +323,7 @@ async function main() {
   const finalBal = await ethers.provider.getBalance(deployer.address);
   console.log("");
   console.log("═══════════════════════════════════════════════════════");
-  console.log(`  DONE — Gas spent: ${ethers.formatEther(balance - finalBal)} BNB`);
+  console.log(`  DONE — Gas spent: ${ethers.formatEther(balance - finalBal)} (native)`);
   console.log("═══════════════════════════════════════════════════════");
   for (const k of [
     "MockConcreteAdapter", "FypherBurnQueue", "FyusdEpochSettlement",

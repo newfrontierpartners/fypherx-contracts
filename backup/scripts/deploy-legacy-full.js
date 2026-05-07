@@ -5,7 +5,7 @@ const addresses = require("./lib/addresses");
 // deployer is unrestricted and deploying these tokens on mainnet would brick
 // state (real users could be tricked into transacting against fake collateral).
 // Restrict to local and BSC Testnet only.
-const ALLOWED_MOCK_NETWORKS = ["hardhat", "localhost", "bscTestnet"];
+const ALLOWED_MOCK_NETWORKS = ["hardhat", "localhost", "bscTestnet", "sepolia"];
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -14,7 +14,8 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════");
   console.log("Deployer:", deployer.address);
   const balance = await ethers.provider.getBalance(deployer.address);
-  console.log("Balance:", ethers.formatEther(balance), "BNB\n");
+  const nativeSym = network.name === "bscTestnet" ? "BNB" : "ETH";
+  console.log("Balance:", ethers.formatEther(balance), nativeSym, "\n");
 
   const deployed = {};
   const tx = (label) => console.log(`  ✓ ${label}`);
@@ -63,7 +64,7 @@ async function main() {
     );
   }
   const MockERC20 = await ethers.getContractFactory("MockERC20");
-  for (const name of ["USDT", "USDC", "WETH", "BTC", "BNB"]) {
+  for (const name of ["USDT", "USDC", "WETH"]) {
     const mock = await MockERC20.deploy(name, name, 18);
     await mock.waitForDeployment();
     deployed[name] = await mock.getAddress();
@@ -171,10 +172,10 @@ async function main() {
   tx("RUSD minter → FypherMinting");
 
   // Register collateral assets
-  for (const name of ["USDT", "USDC", "WETH", "BTC", "BNB"]) {
+  for (const name of ["USDT", "USDC", "WETH"]) {
     await (await minting.addSupportedAsset(deployed[name])).wait();
   }
-  tx("5 collateral assets registered");
+  tx("3 collateral assets registered");
 
   // Add deployer as custodian
   await (await minting.addCustodianAddress(deployer.address)).wait();
@@ -212,7 +213,7 @@ async function main() {
   // ── Summary ──
   const finalBalance = await ethers.provider.getBalance(deployer.address);
   console.log("\n═══════════════════════════════════════════════════════");
-  console.log("  DONE — Gas:", ethers.formatEther(balance - finalBalance), "BNB");
+  console.log("  DONE — Gas:", ethers.formatEther(balance - finalBalance), nativeSym);
   console.log("  Contracts:", Object.keys(deployed).length);
   console.log("═══════════════════════════════════════════════════════");
   for (const [k, v] of Object.entries(deployed)) console.log(`  ${k.padEnd(20)} ${v}`);
