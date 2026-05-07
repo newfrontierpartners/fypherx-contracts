@@ -6,14 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The repo is organized for an external security audit. There is **one canonical Hardhat project**:
 
-- **`sotatek-smart-contracts/`** — alpha-launch contracts: stablecoins (RUSD/FYUSD/iRUSD), governance token (FYP), ERC-4626 cooldown vaults (sRUSD/stAUSD/siRUSD/sFYP), mint engine, burn queue, FYUSD epoch settlement, FYUSD yield vault, FYP emission staking hub, circuit breaker, settings registry. Deployed on BSC Testnet (chainId 97). **Default to working here.**
+- **`sotatek-smart-contracts/`** — alpha-launch contracts: stablecoins (RUSD/FYUSD), governance token (FYP), ERC-4626 cooldown vaults (sRUSD/stAUSD/sFYP — note: stAUSD's underlying is FYUSD), mint engine, burn queue, FYUSD epoch settlement, FYUSD yield vault, FYP emission staking hub, circuit breaker, settings registry. Deployed on BSC Testnet (chainId 97). **Default to working here.**
 
 Out-of-scope code lives in `backup/`:
 
+- `backup/irusd/` — Institutional fork: `InstitutionalRUSD` (iRUSD), `StakedIRUSD` (siRUSD), `SIRUSDSilo`. Deployed on BSC Testnet but unused by alpha frontend/backend.
 - `backup/lp/` — Pancake-V2-style LP vaults (deployed but dormant)
 - `backup/lending/` — Morpho-Blue-style isolated lending markets (deployed but dormant)
 - `backup/perps/` — Perpetual derivatives Hardhat subproject (formerly top-level `contracts/`; never deployed to production)
-- `backup/scripts/` — Deployment + wiring scripts that target the above
+- `backup/scripts/` — Deployment + wiring scripts that target the above (incl. legacy `deploy-legacy-full.js` that deploys the iRUSD trio)
 
 See [`backup/README.md`](./backup/README.md) for why each subdir is excluded. **No alpha contract imports from `backup/`** — `cd sotatek-smart-contracts && npx hardhat clean && npx hardhat compile` succeeds without it.
 
@@ -38,7 +39,6 @@ Solidity **0.8.22**. Hardhat default paths (`sources: ./contracts`, `artifacts: 
 - `Fypher/RUSD.sol` — primary stablecoin (proxy)
 - `Fypher/FYUSD.sol` — yield-bearing stablecoin (proxy)
 - `Fypher/FYP.sol` — governance token (proxy)
-- `Fypher/InstitutionalRUSD.sol` — institutional iRUSD (proxy)
 
 ### Mint / burn
 - `Fypher/FypherMinting.sol` — EIP-712 quoted collateral → RUSD mint engine
@@ -46,17 +46,17 @@ Solidity **0.8.22**. Hardhat default paths (`sources: ./contracts`, `artifacts: 
 
 ### Cooldown vaults (ERC-4626) + silos
 - `Fypher/StakedRUSD.sol` (sRUSD) + `Fypher/RUSDSilo.sol`
-- `Fypher/StakedAUSD.sol` (stAUSD) — uses both `RUSDSilo` (retail) and `SIRUSDSilo` (institutional)
-- `Fypher/StakedIRUSD.sol` (siRUSD) + `Fypher/SIRUSDSilo.sol`
+- `Fypher/StakedAUSD.sol` (stAUSD; underlying = **FYUSD**, legacy name) + `Fypher/RUSDSilo.sol`
 - `Fypher/StakedFYP.sol` (sFYP) + `Fypher/RUSDSilo.sol`
 
 ### FYP emission
 - `Fypher/FypherStakingHub.sol` — multi-pool MasterChef-style FYP emission
 
-### FYUSD yield system
+### Yield-vault system (Concrete-backed)
 - `Fypher/FyusdEpochSettlement.sol` — Get-FYUSD epoch state machine (OPEN/LOCKED/SETTLED/DISTRIBUTED/CANCELLED)
-- `Fypher/FyusdYieldVault.sol` — Concrete-backed FYUSD yield wrapper
-- `Fypher/IConcreteAdapter.sol` — adapter interface
+- `Fypher/FyusdYieldVault.sol` (vFYUSD) — ERC4626 receipt vault, 7-day cooldown via `vFyusdCooldown` pool config
+- `Fypher/RUSDYieldVault.sol` (vRUSD) — ERC4626 receipt vault for RUSD, 14-day cooldown via `vRusdCooldown` pool config
+- `Fypher/IConcreteAdapter.sol` — asset-agnostic adapter interface (one instance per (vault, asset) binding)
 - `Fypher/ConcreteAdapterV1.sol` — mainnet binding stub (reverts NotImplemented today)
 
 ### Safety / config

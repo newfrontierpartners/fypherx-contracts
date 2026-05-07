@@ -15,11 +15,15 @@ import "../libraries/PoolMath.sol";
  * @title StakedAUSD (stAUSD / sFYUSD)
  * @notice ERC4626 vault for FYUSD staking. Underlying asset = FYUSD.
  *         Uses RUSDSilo pattern (2-param withdraw) for cooldown escrow.
+ *         The contract name "StakedAUSD" is a legacy artifact retained
+ *         because the BSC-Testnet proxy is already deployed at this
+ *         implementation; the underlying asset is and always has been
+ *         FYUSD (see {initialize} below).
  *
  * @dev Deployed at: 0x57B74722224e8cA49586E14dFEea37EddcF4Ffda
- *      Has TWO silos:
- *        - stAUSDSilo (0xc65F...) for FYUSD cooldown
- *        - iRUSDSilo  (0x7f51...) for iRUSD cooldown
+ *      Single silo: stAUSDSilo (0xc65F...) for FYUSD cooldown.
+ *      The institutional fork (iRUSDSilo / SIRUSDSilo) was retired
+ *      from the alpha audit scope — see backup/irusd/.
  */
 contract StakedAUSD is
     Initializable,
