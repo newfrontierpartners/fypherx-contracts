@@ -79,18 +79,44 @@ Configured in `sotatek-smart-contracts/hardhat.config.js`:
 
 | Network | URL | Notes |
 |---|---|---|
-| `sepolia` | `https://ethereum-sepolia-rpc.publicnode.com` (chainId 11155111) | Production target for Phase 1 alpha (migrated 2026-04-30) |
+| `sepolia` | `https://ethereum-sepolia-rpc.publicnode.com` (chainId 11155111) | Production target for Phase 1 alpha (migrated 2026-04-30). Address registry: `addresses/11155111.json`. |
+| `hoodi` | `https://ethereum-hoodi-rpc.publicnode.com` (chainId 560048) | FYUSD ↔ Concrete integration testnet — Concrete deployed FYUSD on HOODI directly because they don't support Sepolia for partner stable-vault flows. Concrete's FYUSD: `0xd1bbd247Be78C68cDEB8486744bD4513e62025e6`. Address registry: `addresses/560048.json`. |
 | `bscTestnet` | `https://data-seed-prebsc-1-s1.binance.org:8545` (chainId 97) | Legacy — pre-2026-04-30 deployment, no longer the active target |
 | `hardhat` (in-memory) | n/a | Tests run here |
 
 Required env (`.env` in `sotatek-smart-contracts/`):
 
 ```
-PRIVATE_KEY=0x...                  # deployer EOA
-ETHERSCAN_API_KEY=...              # for source verification (single key covers Etherscan + BscScan)
+PRIVATE_KEY=0x...                       # deployer EOA for sepolia / mainnet / bscTestnet
+ETHERSCAN_API_KEY=...                   # source verification — single key covers Etherscan, BscScan, Hoodi-Etherscan
+HOODI_DEPLOYER_PRIVATE_KEY=0x...        # SEPARATE deployer for HOODI (lives in .env.hoodi-deployer)
 ```
 
-⚠️ **Do not commit `.env`**, and confirm before any deploy that the key matches the intended environment.
+⚠️ **Do not commit `.env` or `.env.hoodi-deployer`**, and confirm before any deploy that the key matches the intended environment.
+
+### HOODI deployer
+
+The HOODI deployer is intentionally a separate key from `PRIVATE_KEY` so the testnet's blast radius is contained — losing this key never bleeds into Sepolia or mainnet ops. To set up a fresh HOODI deployer:
+
+```bash
+cd sotatek-smart-contracts
+node scripts/gen-hoodi-deployer.js
+# → prints address + privateKey + mnemonic. Copy the privateKey into
+#   .env.hoodi-deployer (gitignored), share the public address out-of-band
+#   for faucet funding.
+```
+
+Faucet (recommended: ≥ 0.5 HOODI ETH for full Phase-1 deploy):
+- https://hoodi-faucet.pk910.de/  (PoW, fastest)
+- https://www.alchemy.com/faucets/ethereum-hoodi
+- https://cloud.google.com/application/web3/faucet/ethereum/hoodi
+
+Once funded, deploy via:
+```bash
+source .env.hoodi-deployer
+npx hardhat run scripts/deploy-hoodi.js --network hoodi
+```
+The script is a preflight gate + runbook — it does NOT auto-deploy a giant graph. Subsequent stages (multisig, Phase-1 contracts, Concrete adapter wiring) run as targeted scripts; see `scripts/deploy-hoodi.js` header for the exact order.
 
 ## Backend ↔ contract coupling
 

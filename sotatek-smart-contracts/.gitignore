@@ -29,3 +29,4 @@ typechain-types
 # Per-environment multisig signer config (ADR-007). DO NOT commit —
 # real signer addresses live here, separate per network.
 multisig-signers.*.json
+.env.hoodi-deployer
