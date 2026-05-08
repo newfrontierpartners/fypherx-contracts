@@ -37,7 +37,8 @@
       "slope2PerYearWad": "2500000000000000000"
     },
     "oracleAdapters": {
-      "RUSD_USDT": "0x50f232bc99b7dDE2930AFB28F6e859A4694B0673"
+      "RUSD_USDT": "0x50f232bc99b7dDE2930AFB28F6e859A4694B0673",
+      "3e39_WETH_USDT": "0x299335EED77A74d25d53851F57023Bbf69b5114f"
     },
     "markets": {
       "RUSD_USDT": {
@@ -49,6 +50,66 @@
         "lltvBps": 9200,
         "liquidationBonusBps": 500,
         "reserveFactorBps": 1000,
+        "supplyCap": "0",
+        "borrowCap": "0"
+      },
+      "SRUSD_USDT": {
+        "address": "0x9f2979a481190D0CD03cf801FaEd66155BE3c1Ed",
+        "loanToken": "0x5A81B692b31CE465672b9A660dEEae60a342d50b",
+        "collateralToken": "0xD975cF196EdEC3267F3B9fd364947bAd83f4F7c2",
+        "oracle": "0x50f232bc99b7dDE2930AFB28F6e859A4694B0673",
+        "irm": "0x648435E81ff52f9c837f61F592F9A14C621fBd8F",
+        "lltvBps": 9200,
+        "liquidationBonusBps": 500,
+        "reserveFactorBps": 1000,
+        "supplyCap": "0",
+        "borrowCap": "0"
+      },
+      "SFYUSD_USDC": {
+        "address": "0xb78dF07E3997F5BF0109D040854aA8927c1B8a2c",
+        "loanToken": "0x211DC3dA3EC24B68f11BaEd5843651694BA5CD4B",
+        "collateralToken": "0x160a1D95eaED41147793C3894572E5258Eeb53E9",
+        "oracle": "0x50f232bc99b7dDE2930AFB28F6e859A4694B0673",
+        "irm": "0x648435E81ff52f9c837f61F592F9A14C621fBd8F",
+        "lltvBps": 9200,
+        "liquidationBonusBps": 500,
+        "reserveFactorBps": 1000,
+        "supplyCap": "0",
+        "borrowCap": "0"
+      },
+      "SIRUSD_USDT": {
+        "address": "0x04AfB0516Ec2F98658118ADE5b855F70752eBf47",
+        "loanToken": "0x5A81B692b31CE465672b9A660dEEae60a342d50b",
+        "collateralToken": "0x3B9ebD051f4f41c1C80260e04c3175630014A27E",
+        "oracle": "0x50f232bc99b7dDE2930AFB28F6e859A4694B0673",
+        "irm": "0x648435E81ff52f9c837f61F592F9A14C621fBd8F",
+        "lltvBps": 9000,
+        "liquidationBonusBps": 500,
+        "reserveFactorBps": 1000,
+        "supplyCap": "0",
+        "borrowCap": "0"
+      },
+      "USDC_USDT": {
+        "address": "0xb088E6E42f7C38A90be9b9c497FC697b4cF4E7C9",
+        "loanToken": "0x5A81B692b31CE465672b9A660dEEae60a342d50b",
+        "collateralToken": "0x211DC3dA3EC24B68f11BaEd5843651694BA5CD4B",
+        "oracle": "0x50f232bc99b7dDE2930AFB28F6e859A4694B0673",
+        "irm": "0x648435E81ff52f9c837f61F592F9A14C621fBd8F",
+        "lltvBps": 8700,
+        "liquidationBonusBps": 300,
+        "reserveFactorBps": 500,
+        "supplyCap": "0",
+        "borrowCap": "0"
+      },
+      "WETH_USDT": {
+        "address": "0xB36621a8BbcB0A5DE8426385D3AB71dF198F6D63",
+        "loanToken": "0x5A81B692b31CE465672b9A660dEEae60a342d50b",
+        "collateralToken": "0x5452eda0f2E0b8E6c91C812ad39597f4Fe6320AE",
+        "oracle": "0x299335EED77A74d25d53851F57023Bbf69b5114f",
+        "irm": "0x648435E81ff52f9c837f61F592F9A14C621fBd8F",
+        "lltvBps": 8000,
+        "liquidationBonusBps": 750,
+        "reserveFactorBps": 1500,
         "supplyCap": "0",
         "borrowCap": "0"
       }
