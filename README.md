@@ -625,20 +625,34 @@ Tests run on the in-memory Hardhat network. There are no on-chain tests in CI �
 
 ### 8.5 Deploy (reference)
 
-The audit does not need to redeploy, but the scripts are listed here for completeness:
+The audit does not need to redeploy, but the scripts are listed here for completeness. Deploy is split into per-network base bootstrap + a shared Phase-1 wiring step (the legacy single-shot `scripts/deploy.js` was removed during alpha-audit cleanup):
 
 ```bash
-npx hardhat run scripts/deploy-sepolia.js       --network sepolia    # primary alpha target (post-2026-04-30)
-npx hardhat run scripts/deploy-phase1.js        --network sepolia
-node scripts/setup-custodian.js                 # configures custodian whitelist post-deploy
+# Phase 0 — per network. Example for HOODI (chainId 560048):
+npx hardhat run scripts/deploy-hoodi-phase0.js  --network hoodi
+
+# Phase 1 — network-agnostic, runs against any network after Phase 0:
+npx hardhat run scripts/deploy-phase1.js        --network hoodi
+
+# Yield vaults (vFYUSD + vRUSD ERC4626 receipt tokens):
+npx hardhat run scripts/deploy-yield-vaults.js  --network hoodi
+
+# Redemption mirror (ADR-011 Path A):
+npx hardhat run scripts/deploy-fyusd-redemption.js --network hoodi
+
+# Post-deploy operator wiring:
+node scripts/setup-custodian.js                 # configures custodian whitelist
 node scripts/bootstrap-fpy-treasury.js          # funds FypherStakingHub with FPY
 ```
+
+For Sepolia (the live alpha environment) the same pattern applies; substitute `--network sepolia` and the matching Phase-0 script. The HOODI flow is the most complete reference because it was the latest end-to-end deploy.
 
 Required env (`.env`):
 
 ```
-PRIVATE_KEY=0x...                  # deployer EOA private key
-BSCSCAN_API_KEY=...                # for verification
+PRIVATE_KEY=0x...                  # deployer EOA — used by sepolia / mainnet networks
+HOODI_DEPLOYER_PRIVATE_KEY=0x...   # SEPARATE deployer for HOODI testnet (gitignored .env.hoodi-deployer)
+ETHERSCAN_API_KEY=...              # source verification (single key covers Etherscan + BscScan + hoodi.etherscan)
 ```
 
 ---

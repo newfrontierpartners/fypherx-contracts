@@ -71,7 +71,15 @@ Solidity **0.8.22**. Hardhat default paths (`sources: ./contracts`, `artifacts: 
 - `libraries/PoolMath.sol` — shared math for cooldown vaults
 - `mocks/MockERC20.sol`, `mocks/MockConcreteAdapter.sol` — test fixtures
 
-Each user-facing contract has a matching `test/*.test.js`. `scripts/deploy-sepolia.js` is the current production entry point (was `deploy-bsc-testnet.js` pre-2026-04-30); `scripts/deploy-phase1.js` runs the wiring after deploy. Upgrades are scripted per-contract (`scripts/upgrade-{minting,fyusd}-impl.js`).
+Each user-facing contract has a matching `test/*.test.js`. Deploy is split into per-network base bootstrap + a shared Phase-1 wiring step:
+
+- **HOODI** (`scripts/deploy-hoodi-phase0.js`) — Phase 0 base contracts (SettingManagement, RUSD, FYP, mock USDT/USDC, FypherMinting). FYUSD on HOODI is Concrete-deployed; not redeployed by us.
+- **Phase 1 wiring** (`scripts/deploy-phase1.js`) — runs against any network after Phase 0 lands. Adds BurnQueue, EpochSettlement, StakingHub, YieldVault, CircuitBreaker; sets pool weights + supported assets + pauser roles. Idempotent.
+- **Yield vaults** (`scripts/deploy-yield-vaults.js`) — vFYUSD + vRUSD ERC4626 receipt vaults.
+- **Redemption** (`scripts/deploy-fyusd-redemption.js`) — ADR-011 Path A (FyusdEpochRedemption mirror).
+- **Upgrades** scripted per-contract (`scripts/upgrade-{minting,fyusd}-impl.js`).
+
+The legacy `deploy-bsc-testnet.js` / `deploy-sepolia.js` / `deploy-mainnet.js` per-network wrappers were removed during alpha-audit cleanup — they referenced a `scripts/deploy.js` that was deleted in `0965dd6c`. New per-network deploys follow the self-contained pattern of `deploy-hoodi-phase0.js`.
 
 ## Networks & environment
 
