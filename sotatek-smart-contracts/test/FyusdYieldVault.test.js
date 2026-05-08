@@ -246,21 +246,8 @@ describe("FyusdYieldVault (vFYUSD ERC4626)", () => {
   });
 });
 
-describe("ConcreteAdapterV1 (mainnet stub)", () => {
-  it("reverts NotImplemented on every state-changing call", async () => {
-    const [deployer] = await ethers.getSigners();
-    const FYUSD = await ethers.getContractFactory("FYUSD");
-    const fyusd = await upgrades.deployProxy(FYUSD, [deployer.address], {
-      initializer: "initialize", kind: "transparent",
-    });
-    const Stub = await ethers.getContractFactory("ConcreteAdapterV1");
-    const stub = await Stub.deploy(await fyusd.getAddress(), deployer.address);
-
-    assert.equal(await stub.asset(), await fyusd.getAddress());
-    await assert.rejects(stub.deposit(1n), (err) => err.message.includes("NotImplemented"));
-    await assert.rejects(stub.withdraw(1n), (err) => err.message.includes("NotImplemented"));
-    await assert.rejects(stub.totalAssets(), (err) => err.message.includes("NotImplemented"));
-    await assert.rejects(stub.shareOf(deployer.address), (err) => err.message.includes("NotImplemented"));
-    await assert.rejects(stub.realizedYield7d(), (err) => err.message.includes("NotImplemented"));
-  });
-});
+// ConcreteAdapterV1 used to be a stub that reverted NotImplemented on
+// every state-changing call. As of feat/concrete-adapter-v1-impl, it's
+// a live binding against a Concrete Earn V2 ERC-4626 vault. Real-
+// implementation coverage (deposit / withdraw / yield accrual / share
+// isolation) lives in test/ConcreteAdapterV1.test.js.
