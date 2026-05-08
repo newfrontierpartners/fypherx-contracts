@@ -190,7 +190,7 @@ async function main() {
     const Vault = await ethers.getContractFactory("FyusdYieldVault");
     const vault = await upgrades.deployProxy(
       Vault,
-      [settingMgmtAddr, addrs.FYUSD, addrs.MockConcreteAdapter],
+      [settingMgmtAddr, addrs.FYUSD, addrs.MockConcreteAdapter, deployer.address /* admin */],
       { initializer: "initialize", kind: "transparent" },
     );
     await vault.waitForDeployment();
