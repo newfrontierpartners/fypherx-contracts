@@ -22,7 +22,7 @@ module.exports = {
     },
   },
   etherscan: {
-    // Etherscan V2 unified key — one API key works across BSCScan, Etherscan, etc.
-    apiKey: process.env.ETHERSCAN_API_KEY || process.env.BSCSCAN_API_KEY || "",
+    // Etherscan V2 unified key — one API key works across all supported explorers.
+    apiKey: process.env.ETHERSCAN_API_KEY || "",
   },
 };

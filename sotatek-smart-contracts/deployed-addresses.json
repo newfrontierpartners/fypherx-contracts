@@ -23,5 +23,35 @@
   "FyusdEpochSettlement": "0xAe5e7D463eAA33c7942D29eecB7747FFc268f913",
   "FypherStakingHub": "0x581a77fA7455653740d07aCD8462a15aFf0b2562",
   "FyusdYieldVault": "0x8ed7eb0EF7d1A00740148c36D90e4aE58aF59322",
-  "FypherCircuitBreaker": "0x5D0e1FbB61fC9CB182B4954762727E6CDbF9eb07"
+  "FypherCircuitBreaker": "0x5D0e1FbB61fC9CB182B4954762727E6CDbF9eb07",
+  "lending": {
+    "irm": "0x648435E81ff52f9c837f61F592F9A14C621fBd8F",
+    "insuranceFund": "0x4944A17d153DFccE9Ab9eD3723482a9Fc0189B2D",
+    "oracleRouter": "0x2df1E9ab47212373C486153DE337dcDc9eCB7FBD",
+    "marketFactory": "0x625AF1d3AFAbAcAb556Ad024408254A87b7d65ea",
+    "timelock": "0x31B60b11533c97b5ED7b1B650D31855F3754Acb4",
+    "irmParams": {
+      "baseRatePerYearWad": "40000000000000000",
+      "kinkUtilisationWad": "800000000000000000",
+      "slope1PerYearWad": "100000000000000000",
+      "slope2PerYearWad": "2500000000000000000"
+    },
+    "oracleAdapters": {
+      "RUSD_USDT": "0x50f232bc99b7dDE2930AFB28F6e859A4694B0673"
+    },
+    "markets": {
+      "RUSD_USDT": {
+        "address": "0xC75EC9067C09Ef55E313aC71be8AFFb479Ef5404",
+        "loanToken": "0x5A81B692b31CE465672b9A660dEEae60a342d50b",
+        "collateralToken": "0xb260b1f9eD00dd0a40fF1dDfAC333184db88d119",
+        "oracle": "0x50f232bc99b7dDE2930AFB28F6e859A4694B0673",
+        "irm": "0x648435E81ff52f9c837f61F592F9A14C621fBd8F",
+        "lltvBps": 9200,
+        "liquidationBonusBps": 500,
+        "reserveFactorBps": 1000,
+        "supplyCap": "0",
+        "borrowCap": "0"
+      }
+    }
+  }
 }
