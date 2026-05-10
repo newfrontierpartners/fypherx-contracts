@@ -52,6 +52,7 @@ async function deployFixture() {
     await setting.getAddress(),
     await fyusd.getAddress(),
     await adapter.getAddress(),
+    deployer.address,
   ], { initializer: "initialize", kind: "transparent" });
 
   // Breaker.
@@ -76,10 +77,12 @@ function encodeSetMintPaused(asset, paused) {
   ]).encodeFunctionData("setMintPaused", [asset, paused]);
 }
 
-function encodeSetVaultPaused(paused) {
-  return new ethers.Interface([
-    "function setVaultPaused(bool)",
-  ]).encodeFunctionData("setVaultPaused", [paused]);
+function encodeVaultPause() {
+  return new ethers.Interface(["function pause()"]).encodeFunctionData("pause", []);
+}
+
+function encodeVaultUnpause() {
+  return new ethers.Interface(["function unpause()"]).encodeFunctionData("unpause", []);
 }
 
 describe("FypherCircuitBreaker", () => {
@@ -137,11 +140,11 @@ describe("FypherCircuitBreaker", () => {
       // Register a trigger that pauses BOTH minting (USDT-asset) and vault.
       const pauseCalls = [
         { target: await minting.getAddress(), data: encodeSetMintPaused(await usdt.getAddress(), true) },
-        { target: await vault.getAddress(),   data: encodeSetVaultPaused(true) },
+        { target: await vault.getAddress(),   data: encodeVaultPause() },
       ];
       const unpauseCalls = [
         { target: await minting.getAddress(), data: encodeSetMintPaused(await usdt.getAddress(), false) },
-        { target: await vault.getAddress(),   data: encodeSetVaultPaused(false) },
+        { target: await vault.getAddress(),   data: encodeVaultUnpause() },
       ];
       await (await breaker.registerTrigger("major incident", "...", pauseCalls, unpauseCalls)).wait();
 
@@ -149,7 +152,7 @@ describe("FypherCircuitBreaker", () => {
       await (await breaker.connect(watchdog).trip(0n, reasonHash)).wait();
 
       assert.equal(await minting.mintPaused(await usdt.getAddress()), true);
-      assert.equal(await vault.vaultPaused(), true);
+      assert.equal(await vault.paused(), true);
       assert.equal((await breaker.triggerInfo(0n)).tripped, true);
     });
 
@@ -157,11 +160,11 @@ describe("FypherCircuitBreaker", () => {
       const { deployer, breaker, minting, vault, usdt, watchdog } = await deployFixture();
       const pauseCalls = [
         { target: await minting.getAddress(), data: encodeSetMintPaused(await usdt.getAddress(), true) },
-        { target: await vault.getAddress(),   data: encodeSetVaultPaused(true) },
+        { target: await vault.getAddress(),   data: encodeVaultPause() },
       ];
       const unpauseCalls = [
         { target: await minting.getAddress(), data: encodeSetMintPaused(await usdt.getAddress(), false) },
-        { target: await vault.getAddress(),   data: encodeSetVaultPaused(false) },
+        { target: await vault.getAddress(),   data: encodeVaultUnpause() },
       ];
       await (await breaker.registerTrigger("major incident", "...", pauseCalls, unpauseCalls)).wait();
       await (await breaker.connect(watchdog).trip(0n, ethers.ZeroHash)).wait();
@@ -177,13 +180,13 @@ describe("FypherCircuitBreaker", () => {
       assert.equal((await breaker.triggerInfo(0n)).tripped, false);
       // Targets remain paused — multisig still has work to do.
       assert.equal(await minting.mintPaused(await usdt.getAddress()), true);
-      assert.equal(await vault.vaultPaused(), true);
+      assert.equal(await vault.paused(), true);
 
       // Multisig (deployer in tests) issues the actual unpause txs.
       await (await minting.connect(deployer).setMintPaused(await usdt.getAddress(), false)).wait();
-      await (await vault.connect(deployer).setVaultPaused(false)).wait();
+      await (await vault.connect(deployer).unpause()).wait();
       assert.equal(await minting.mintPaused(await usdt.getAddress()), false);
-      assert.equal(await vault.vaultPaused(), false);
+      assert.equal(await vault.paused(), false);
 
       // The unpauseCalls template stored on the breaker matches what the
       // multisig just executed — operator can read it for the next incident.
