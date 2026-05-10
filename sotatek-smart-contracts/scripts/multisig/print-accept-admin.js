@@ -22,7 +22,7 @@
  * the deployer EOA is no longer admin.
  *
  * Usage:
- *   npx hardhat run scripts/multisig/print-accept-admin.js --network bscTestnet
+ *   npx hardhat run scripts/multisig/print-accept-admin.js --network hoodi
  */
 const { ethers, network } = require("hardhat");
 const addresses = require("../lib/addresses");

@@ -25,7 +25,7 @@
  *   - FYUSD impl upgrade (S1.3a — emergencyMint). Same reasoning.
  *
  *   - Multisig migration (S1.7). Requires the per-network signer
- *     set in `multisig-signers.bscTestnet.json` (gitignored) — see
+ *     set in `multisig-signers.hoodi.json` (gitignored) — see
  *     `scripts/multisig/deploy-safe.js` + `transfer-admin.js` to
  *     run that ceremony separately.
  *
@@ -52,7 +52,7 @@
  *
  * Usage
  * ─────
- *   npx hardhat run scripts/deploy-phase1.js --network bscTestnet
+ *   npx hardhat run scripts/deploy-phase1.js --network hoodi
  *
  * Required env (loaded from .env):
  *   PRIVATE_KEY           deployer EOA (must hold testnet BNB for gas)

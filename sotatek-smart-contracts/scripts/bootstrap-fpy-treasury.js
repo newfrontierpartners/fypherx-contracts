@@ -30,7 +30,7 @@
  *
  * Usage
  * ─────
- *   npx hardhat run scripts/bootstrap-fpy-treasury.js --network bscTestnet
+ *   npx hardhat run scripts/bootstrap-fpy-treasury.js --network hoodi
  *
  * Optional env:
  *   FYPHERX_FPY_BOOTSTRAP_WEI  override the default 100_000 * 1e18

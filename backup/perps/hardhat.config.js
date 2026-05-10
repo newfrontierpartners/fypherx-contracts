@@ -52,21 +52,21 @@ module.exports = {
       url: process.env.TESTNET_RPC_URL || "",
       accounts
     },
-    bscTestnet: {
-      url: process.env.BSC_TESTNET_RPC || "https://data-seed-prebsc-1-s1.binance.org:8545",
-      chainId: 97,
+    hoodi: {
+      url: process.env.HOODI_RPC_URL || "https://ethereum-hoodi-rpc.publicnode.com",
+      chainId: 560048,
       accounts
     }
   },
   etherscan: {
-    apiKey: process.env.BSCSCAN_API_KEY || "",
+    apiKey: process.env.ETHERSCAN_API_KEY || "",
     customChains: [
       {
-        network: "bscTestnet",
-        chainId: 97,
+        network: "hoodi",
+        chainId: 560048,
         urls: {
-          apiURL: "https://api.etherscan.io/v2/api?chainid=97",
-          browserURL: "https://testnet.bscscan.com"
+          apiURL: "https://api-hoodi.etherscan.io/api",
+          browserURL: "https://hoodi.etherscan.io"
         }
       }
     ]

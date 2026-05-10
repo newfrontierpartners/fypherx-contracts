@@ -32,7 +32,7 @@
  * a file for ops review:
  *
  *   npx hardhat run scripts/survey-old-vault-stakers.js \
- *     --network bscTestnet > stakers.csv
+ *     --network hoodi > stakers.csv
  *
  * Implementation
  * ──────────────

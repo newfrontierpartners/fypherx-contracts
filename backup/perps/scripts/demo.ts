@@ -40,10 +40,10 @@ type Deployments = {
   oracles: Record<string, { feed: string; decimals: number }>;
 };
 
-const DEPLOYMENTS_PATH = path.join(__dirname, "..", "deployments", "bscTestnet.json");
-const RPC_URL = process.env.BSC_TESTNET_RPC || "https://data-seed-prebsc-1-s1.binance.org:8545";
+const DEPLOYMENTS_PATH = path.join(__dirname, "..", "deployments", "hoodi.json");
+const RPC_URL = process.env.HOODI_RPC_URL || "https://ethereum-hoodi-rpc.publicnode.com";
 const PK = process.env.DEPLOYER_PRIVATE_KEY;
-const EXPLORER = "https://testnet.bscscan.com";
+const EXPLORER = "https://hoodi.etherscan.io";
 
 if (!PK) throw new Error("DEPLOYER_PRIVATE_KEY missing in .env");
 

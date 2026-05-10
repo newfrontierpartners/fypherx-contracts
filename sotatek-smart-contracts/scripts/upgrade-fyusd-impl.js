@@ -33,7 +33,7 @@
  *
  * Usage
  * ─────
- *   npx hardhat run scripts/upgrade-fyusd-impl.js --network bscTestnet
+ *   npx hardhat run scripts/upgrade-fyusd-impl.js --network hoodi
  */
 const { ethers, upgrades } = require("hardhat");
 const addresses = require("./lib/addresses");

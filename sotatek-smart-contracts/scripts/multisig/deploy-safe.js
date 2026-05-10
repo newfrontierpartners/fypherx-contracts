@@ -6,7 +6,7 @@
  * safe-config.js but can be overridden in the JSON.
  *
  * Usage:
- *   npx hardhat run scripts/multisig/deploy-safe.js --network bscTestnet
+ *   npx hardhat run scripts/multisig/deploy-safe.js --network hoodi
  *
  * After this runs, the new Safe address is appended to the addresses
  * file (deployed-addresses.json today; addresses/{chainId}.json after
