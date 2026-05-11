@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"ls /Users/jackbereson/Projects/fypher-x/fypherx-contracts/contracts/contracts/ 2>&1; echo \\\"---ADDR---\\\"; ls /Users/jackbereson/Projects/fypher-x/fypherx-contracts/contracts/addresses/ 2>&...",
-  "error": "Exit code 1\nls: /Users/jackbereson/Projects/fypher-x/fypherx-contracts/contracts/contracts/: No such file or directory\n---ADDR---\nls: /Users/jackbereson/Projects/fypher-x/fypherx-contracts/contracts/addresses/: No such file or directory",
-  "timestamp": "2026-04-30T11:14:41.221Z",
-  "retry_count": 1
-}

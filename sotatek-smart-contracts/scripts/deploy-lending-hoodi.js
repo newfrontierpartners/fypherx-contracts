@@ -1,0 +1,175 @@
+/**
+ * Stage 1 lending deploy — Ethereum HOODI testnet (chainId 560048).
+ *
+ * Mirror of deploy-lending-sepolia.js, retargeted at HOODI so the lending
+ * stack ships alongside the FYUSD x Concrete integration. Reads existing
+ * RUSD/USDT addresses from addresses/560048.json (deployed via
+ * deploy-hoodi-phase0 / phase1 / staking-vaults-hoodi).
+ *
+ * Usage:
+ *   npx hardhat run scripts/deploy-lending-hoodi.js --network hoodi
+ *
+ * Requires HOODI_DEPLOYER_PRIVATE_KEY (or PRIVATE_KEY fallback) in .env
+ * with funded HOODI ETH.
+ */
+const { ethers } = require("hardhat");
+const addresses = require("./lib/addresses");
+
+const EXPECTED_CHAIN_ID = 560048;
+
+const WAD = 10n ** 18n;
+const IRM_BASE_RATE_PER_YEAR  = (WAD * 4n) / 100n;
+const IRM_KINK_UTILISATION    = (WAD * 80n) / 100n;
+const IRM_SLOPE1_PER_YEAR     = (WAD * 10n) / 100n;
+const IRM_SLOPE2_PER_YEAR     = (WAD * 250n) / 100n;
+
+const STAGE1_LLTV_BPS               = 9200n;
+const STAGE1_LIQUIDATION_BONUS_BPS  = 500n;
+const STAGE1_RESERVE_FACTOR_BPS     = 1000n;
+const STAGE1_SUPPLY_CAP             = 0n;
+const STAGE1_BORROW_CAP             = 0n;
+
+const STAGE1_CONSTANT_PRICE_1E36 = 10n ** 36n;
+
+async function main() {
+  const net = await ethers.provider.getNetwork();
+  const chainId = Number(net.chainId);
+  if (chainId !== EXPECTED_CHAIN_ID) {
+    throw new Error(
+      `deploy-lending-hoodi.js requires chainId ${EXPECTED_CHAIN_ID}, got ${chainId}. ` +
+      `Re-run with --network hoodi.`
+    );
+  }
+
+  const [deployer] = await ethers.getSigners();
+  console.log(`\n[lending-deploy] chainId ${chainId}`);
+  console.log(`[lending-deploy] deployer ${deployer.address}`);
+  const bal = await ethers.provider.getBalance(deployer.address);
+  console.log(`[lending-deploy] balance  ${ethers.formatEther(bal)} ETH\n`);
+
+  const existing = addresses.load(chainId);
+  const RUSD = requireAddr(existing, "RUSD");
+  const USDT = requireAddr(existing, "USDT");
+  console.log(`[lending-deploy] RUSD = ${RUSD}`);
+  console.log(`[lending-deploy] USDT = ${USDT}\n`);
+
+  console.log("[lending-deploy] 1/7 KinkedIRM ...");
+  const KinkedIRM = await ethers.getContractFactory("KinkedIRM");
+  const irm = await KinkedIRM.deploy(
+    IRM_BASE_RATE_PER_YEAR,
+    IRM_KINK_UTILISATION,
+    IRM_SLOPE1_PER_YEAR,
+    IRM_SLOPE2_PER_YEAR
+  );
+  await irm.waitForDeployment();
+  const irmAddr = await irm.getAddress();
+  console.log(`           ↳ ${irmAddr}`);
+
+  console.log("[lending-deploy] 2/7 InsuranceFundV2 ...");
+  const InsuranceFundV2 = await ethers.getContractFactory("InsuranceFundV2");
+  const insuranceFund = await InsuranceFundV2.deploy(deployer.address);
+  await insuranceFund.waitForDeployment();
+  const insuranceFundAddr = await insuranceFund.getAddress();
+  console.log(`           ↳ ${insuranceFundAddr}`);
+
+  console.log("[lending-deploy] 3/7 OracleRouterV2 ...");
+  const OracleRouterV2 = await ethers.getContractFactory("OracleRouterV2");
+  const oracleRouter = await OracleRouterV2.deploy(deployer.address);
+  await oracleRouter.waitForDeployment();
+  const oracleRouterAddr = await oracleRouter.getAddress();
+  console.log(`           ↳ ${oracleRouterAddr}`);
+
+  console.log("[lending-deploy] 4/7 FypherLendingMarketFactory ...");
+  const Factory = await ethers.getContractFactory("FypherLendingMarketFactory");
+  const factory = await Factory.deploy(deployer.address, insuranceFundAddr);
+  await factory.waitForDeployment();
+  const factoryAddr = await factory.getAddress();
+  console.log(`           ↳ ${factoryAddr}`);
+
+  console.log("[lending-deploy]     insuranceFund.setFactory(factory) ...");
+  await (await insuranceFund.setFactory(factoryAddr)).wait();
+
+  console.log("\n[lending-deploy] 5/7 ConstantOracleAdapter (RUSD↔USDT, 1e36) ...");
+  const ConstantOracleAdapter = await ethers.getContractFactory("ConstantOracleAdapter");
+  const oracleAdapter = await ConstantOracleAdapter.deploy(STAGE1_CONSTANT_PRICE_1E36);
+  await oracleAdapter.waitForDeployment();
+  const oracleAdapterAddr = await oracleAdapter.getAddress();
+  console.log(`           ↳ ${oracleAdapterAddr}`);
+
+  console.log("[lending-deploy] 6/7 oracleRouter.setAdapter(RUSD, USDT, adapter) ...");
+  await (await oracleRouter.setAdapter(RUSD, USDT, oracleAdapterAddr)).wait();
+
+  console.log("[lending-deploy] 7/7 factory.createMarket(RUSD/USDT) ...");
+  const initParams = {
+    loanToken:           USDT,
+    collateralToken:     RUSD,
+    oracle:              oracleAdapterAddr,
+    irm:                 irmAddr,
+    lltvBps:             STAGE1_LLTV_BPS,
+    liquidationBonusBps: STAGE1_LIQUIDATION_BONUS_BPS,
+    reserveFactorBps:    STAGE1_RESERVE_FACTOR_BPS,
+    supplyCap:           STAGE1_SUPPLY_CAP,
+    borrowCap:           STAGE1_BORROW_CAP,
+    timelock:            deployer.address,
+    insuranceFund:       insuranceFundAddr,
+  };
+  const tx = await factory.createMarket(initParams);
+  const rcpt = await tx.wait();
+
+  const marketCreatedTopic = factory.interface.getEvent("MarketCreated").topicHash;
+  const log = rcpt.logs.find(
+    (l) => l.address.toLowerCase() === factoryAddr.toLowerCase() && l.topics[0] === marketCreatedTopic
+  );
+  if (!log) throw new Error("MarketCreated event not found in createMarket receipt");
+  const decoded = factory.interface.parseLog(log);
+  const marketAddr = decoded.args.market;
+  console.log(`           ↳ market ${marketAddr}`);
+
+  const lendingBlock = {
+    irm:              irmAddr,
+    insuranceFund:    insuranceFundAddr,
+    oracleRouter:     oracleRouterAddr,
+    marketFactory:    factoryAddr,
+    timelock:         deployer.address,
+    irmParams: {
+      baseRatePerYearWad:   IRM_BASE_RATE_PER_YEAR.toString(),
+      kinkUtilisationWad:   IRM_KINK_UTILISATION.toString(),
+      slope1PerYearWad:     IRM_SLOPE1_PER_YEAR.toString(),
+      slope2PerYearWad:     IRM_SLOPE2_PER_YEAR.toString(),
+    },
+    oracleAdapters: {
+      RUSD_USDT: oracleAdapterAddr,
+    },
+    markets: {
+      RUSD_USDT: {
+        address:             marketAddr,
+        loanToken:           USDT,
+        collateralToken:     RUSD,
+        oracle:              oracleAdapterAddr,
+        irm:                 irmAddr,
+        lltvBps:             Number(STAGE1_LLTV_BPS),
+        liquidationBonusBps: Number(STAGE1_LIQUIDATION_BONUS_BPS),
+        reserveFactorBps:    Number(STAGE1_RESERVE_FACTOR_BPS),
+        supplyCap:           STAGE1_SUPPLY_CAP.toString(),
+        borrowCap:           STAGE1_BORROW_CAP.toString(),
+      },
+    },
+  };
+
+  const merged = { ...existing, lending: lendingBlock };
+  addresses.save(chainId, merged);
+  console.log(`\n[lending-deploy] addresses/${chainId}.json updated (key: "lending")`);
+
+  console.log("\n[lending-deploy] DONE — Stage 1 deployed:");
+  console.log(JSON.stringify(lendingBlock, null, 2));
+}
+
+function requireAddr(map, key) {
+  const v = map[key];
+  if (!v || typeof v !== "string" || !v.startsWith("0x")) {
+    throw new Error(`Missing/invalid address for "${key}" in addresses file`);
+  }
+  return v;
+}
+
+main().catch((err) => { console.error(err); process.exit(1); });

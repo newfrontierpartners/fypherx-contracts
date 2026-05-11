@@ -47,7 +47,7 @@ const DEFAULT_MARKET_CONFIG = {
   maxPositionSizeE18: 1_000_000n * 10n ** 18n
 };
 
-const BSC_TESTNET_RUSD = "0xF3ac96da1edD17bb0e803Ad1d1c9Cbc18b42FaB5";
+const HOODI_RUSD = "0x16b0aB78B9f37747a9C088C89E74CB4eC67BB259";
 
 function marketIdBytes32(symbol) {
   // Matches the backend's `Hash.sha3String(marketId)` so the same market key
@@ -65,10 +65,10 @@ async function main() {
   const initialSigner = process.env.INITIAL_SIGNER || deployer.address;
   const initialOperator = process.env.INITIAL_OPERATOR || deployer.address;
 
-  // Collateral token — BSC Testnet defaults to the pre-deployed RUSD but
+  // Collateral token — HOODI defaults to the pre-deployed RUSD but
   // allow override for other environments.
   const collateralToken = process.env.COLLATERAL_TOKEN_ADDRESS
-    || (networkName === "bscTestnet" ? BSC_TESTNET_RUSD : null);
+    || (networkName === "hoodi" ? HOODI_RUSD : null);
   if (!collateralToken) {
     throw new Error(
       "COLLATERAL_TOKEN_ADDRESS must be set (no default for network=" + networkName + ")"
