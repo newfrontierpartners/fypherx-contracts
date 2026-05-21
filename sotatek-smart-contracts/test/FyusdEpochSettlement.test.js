@@ -29,22 +29,33 @@ async function nowPlus(seconds) {
   return BigInt(blk.timestamp + seconds);
 }
 
-async function signQuote(signer, quote) {
-  const orderHash = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256", "address", "uint256", "uint256", "uint256", "uint256"],
-      [
-        quote.user,
-        quote.epochId,
-        quote.collateralAsset,
-        quote.collateralAmount,
-        quote.fyusdAmount,
-        quote.nonce,
-        quote.expiry,
-      ],
-    ),
-  );
-  return signer.signMessage(ethers.getBytes(orderHash));
+/**
+ * Sign a DepositQuote using the EIP-712 envelope post-FYP-07.
+ * Pass the epoch contract (or its address) so the domain separator
+ * binds to the right verifyingContract.
+ */
+async function signQuote(signer, quote, epoch) {
+  const verifyingContract =
+    typeof epoch === "string" ? epoch : await epoch.getAddress();
+  const { chainId } = await ethers.provider.getNetwork();
+  const domain = {
+    name: "FyusdEpochSettlement",
+    version: "1",
+    chainId,
+    verifyingContract,
+  };
+  const types = {
+    DepositQuote: [
+      { name: "user", type: "address" },
+      { name: "epochId", type: "uint256" },
+      { name: "collateralAsset", type: "address" },
+      { name: "collateralAmount", type: "uint256" },
+      { name: "fyusdAmount", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "expiry", type: "uint256" },
+    ],
+  };
+  return signer.signTypedData(domain, types, quote);
 }
 
 async function deployFixture() {
@@ -195,7 +206,7 @@ describe("FyusdEpochSettlement", () => {
         nonce: 1n,
         expiry: await nowPlus(600),
       };
-      const sig = await signQuote(backend, quote);
+      const sig = await signQuote(backend, quote, epoch);
       await (await epoch.connect(alice).deposit(quote, sig)).wait();
 
       // Lock + settle.
@@ -222,7 +233,7 @@ describe("FyusdEpochSettlement", () => {
         nonce: 1n,
         expiry: await nowPlus(600),
       };
-      const sig = await signQuote(backend, quote);
+      const sig = await signQuote(backend, quote, epoch);
 
       const aliceBefore = await usdt.balanceOf(alice.address);
       await (await epoch.connect(alice).deposit(quote, sig)).wait();
@@ -246,7 +257,7 @@ describe("FyusdEpochSettlement", () => {
       };
 
       // Bad sig: signed by wrong key.
-      const badSig = await signQuote(deployer, base);
+      const badSig = await signQuote(deployer, base, epoch);
       await assert.rejects(
         epoch.connect(alice).deposit(base, badSig),
         (err) => err.message.includes("InvalidSignature"),
@@ -254,7 +265,7 @@ describe("FyusdEpochSettlement", () => {
 
       // Expired.
       const expired = { ...base, nonce: 101n, expiry: (await nowPlus(0)) - 1n };
-      const expiredSig = await signQuote(backend, expired);
+      const expiredSig = await signQuote(backend, expired, epoch);
       await assert.rejects(
         epoch.connect(alice).deposit(expired, expiredSig),
         (err) => err.message.includes("ExpiredQuote"),
@@ -262,7 +273,7 @@ describe("FyusdEpochSettlement", () => {
 
       // Replay.
       const okQuote = { ...base, nonce: 102n };
-      const okSig = await signQuote(backend, okQuote);
+      const okSig = await signQuote(backend, okQuote, epoch);
       await (await epoch.connect(alice).deposit(okQuote, okSig)).wait();
       await assert.rejects(
         epoch.connect(alice).deposit(okQuote, okSig),
@@ -272,7 +283,7 @@ describe("FyusdEpochSettlement", () => {
       // Paused asset.
       await (await epoch.connect(pauser).setDepositPaused(await usdt.getAddress(), true)).wait();
       const paused = { ...base, nonce: 103n };
-      const pausedSig = await signQuote(backend, paused);
+      const pausedSig = await signQuote(backend, paused, epoch);
       await assert.rejects(
         epoch.connect(alice).deposit(paused, pausedSig),
         (err) => err.message.includes("DepositPausedForAsset"),
@@ -293,7 +304,7 @@ describe("FyusdEpochSettlement", () => {
         nonce: 200n,
         expiry: await nowPlus(600),
       };
-      const sig = await signQuote(backend, quote);
+      const sig = await signQuote(backend, quote, epoch);
       await assert.rejects(
         epoch.connect(alice).deposit(quote, sig),
         (err) => err.message.includes("EpochAlreadyLocked"),
@@ -317,7 +328,7 @@ describe("FyusdEpochSettlement", () => {
           nonce: n,
           expiry: await nowPlus(600),
         };
-        const sig = await signQuote(backend, q);
+        const sig = await signQuote(backend, q, epoch);
         await (await epoch.connect(user).deposit(q, sig)).wait();
       }
 
@@ -348,7 +359,7 @@ describe("FyusdEpochSettlement", () => {
           nonce: n,
           expiry: await nowPlus(600),
         };
-        const sig = await signQuote(backend, q);
+        const sig = await signQuote(backend, q, epoch);
         await (await epoch.connect(user).deposit(q, sig)).wait();
       }
       await increaseTime(TEN_HOURS + 1n);
@@ -374,7 +385,7 @@ describe("FyusdEpochSettlement", () => {
         nonce: 1n,
         expiry: await nowPlus(600),
       };
-      await (await epoch.connect(alice).deposit(q, await signQuote(backend, q))).wait();
+      await (await epoch.connect(alice).deposit(q, await signQuote(backend, q, epoch))).wait();
       await increaseTime(TEN_HOURS + 1n);
       await (await epoch.lockEpoch(1n)).wait();
       await (await epoch.connect(executor).settleEpoch(1n, 100n * ONE)).wait();
@@ -399,7 +410,7 @@ describe("FyusdEpochSettlement", () => {
         nonce: 1n,
         expiry: await nowPlus(600),
       };
-      await (await epoch.connect(alice).deposit(q, await signQuote(backend, q))).wait();
+      await (await epoch.connect(alice).deposit(q, await signQuote(backend, q, epoch))).wait();
 
       // Cancel before lock.
       const reasonHash = ethers.keccak256(ethers.toUtf8Bytes("bitgo-outage-test"));
@@ -425,7 +436,7 @@ describe("FyusdEpochSettlement", () => {
         nonce: 1n,
         expiry: await nowPlus(600),
       };
-      await (await epoch.connect(alice).deposit(q, await signQuote(backend, q))).wait();
+      await (await epoch.connect(alice).deposit(q, await signQuote(backend, q, epoch))).wait();
       await increaseTime(TEN_HOURS + 1n);
       await (await epoch.lockEpoch(1n)).wait();
 

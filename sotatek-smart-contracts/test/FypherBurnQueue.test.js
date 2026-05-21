@@ -36,28 +36,28 @@ async function latestTimestamp() {
 }
 
 /**
- * Sign a BurnQuote with the given signer using the same EIP-191
- * personal_sign envelope as FypherBurnQueue._verifyQuote.
+ * Sign a BurnQuote with the given signer using the EIP-712 envelope
+ * FypherBurnQueue._verifyQuote authenticates against (FYP-07 patch).
  */
 async function signQuote(signer, queueAddress, quote) {
-  // Mirror Solidity hashQuote(quote)
-  const orderHash = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "address", "uint256", "uint256", "uint256", "uint256"],
-      [
-        quote.user,
-        quote.collateralAsset,
-        quote.rusdAmount,
-        quote.collateralAmount,
-        quote.nonce,
-        quote.expiry,
-      ],
-    ),
-  );
-  // ECDSA.toEthSignedMessageHash + signer.signMessage handle the prefix on
-  // both sides. signMessage takes a byte array, not a hex string, so wrap
-  // the raw 32-byte digest with getBytes.
-  return signer.signMessage(ethers.getBytes(orderHash));
+  const { chainId } = await ethers.provider.getNetwork();
+  const domain = {
+    name: "FypherBurnQueue",
+    version: "1",
+    chainId,
+    verifyingContract: queueAddress,
+  };
+  const types = {
+    BurnQuote: [
+      { name: "user", type: "address" },
+      { name: "collateralAsset", type: "address" },
+      { name: "rusdAmount", type: "uint256" },
+      { name: "collateralAmount", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "expiry", type: "uint256" },
+    ],
+  };
+  return signer.signTypedData(domain, types, quote);
 }
 
 async function deployFixture() {
@@ -424,12 +424,17 @@ describe("FypherBurnQueue", () => {
       const quote = await makeQuote(alice, queue, usdt, { nonce: 7n });
       const sig = await signQuote(backend, await queue.getAddress(), quote);
 
-      // hashQuote returns the deterministic digest used inside _verifyQuote.
+      // hashQuote returns the EIP-712 struct hash (BURN_TYPEHASH + fields)
+      // used inside _verifyQuote (FYP-07 patch).
       const onchainHash = await queue.hashQuote(quote);
+      const BURN_TYPEHASH = ethers.keccak256(ethers.toUtf8Bytes(
+        "BurnQuote(address user,address collateralAsset,uint256 rusdAmount,uint256 collateralAmount,uint256 nonce,uint256 expiry)"
+      ));
       const offchainHash = ethers.keccak256(
         ethers.AbiCoder.defaultAbiCoder().encode(
-          ["address", "address", "uint256", "uint256", "uint256", "uint256"],
+          ["bytes32", "address", "address", "uint256", "uint256", "uint256", "uint256"],
           [
+            BURN_TYPEHASH,
             quote.user,
             quote.collateralAsset,
             quote.rusdAmount,

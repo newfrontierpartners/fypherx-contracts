@@ -13,6 +13,14 @@ interface IRUSD {
     function mint(address to, uint256 amount) external;
 }
 
+/// @dev RUSD inherits ERC20BurnableUpgradeable, exposing `burn(uint256)`
+///      that destroys the caller's own balance. Used by {executeRedeem}
+///      to burn the user's escrowed RUSD in lockstep with collateral
+///      release (FYP-08 patch).
+interface IRUSDBurnable {
+    function burn(uint256 amount) external;
+}
+
 /**
  * @title FypherMinting
  * @notice Collateral order matching and RUSD redeem with per-block rate limiting.
@@ -417,6 +425,18 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
      *      order with the wrong amount.
      *
      * @dev April-audit M-7 patch. Per-asset redeem cap is now enforced.
+     *
+     * @dev FYP-08 patch. The escrowed RUSD is now BURNED in the same
+     *      transaction the collateral is released. The previous shape
+     *      released collateral and deleted the escrow record but left
+     *      the user's RUSD permanently parked in this contract's
+     *      balance — it had no on-chain recovery path today, but
+     *      every successful redeem drifted `RUSD.totalSupply()`
+     *      upward relative to actual circulating supply, breaking the
+     *      `totalSupply ≤ collateral backing` invariant the README
+     *      flags as critical. Burning here also matches the pattern
+     *      {FypherBurnQueue.requestBurn} already uses (it burns RUSD
+     *      immediately and only escrows the collateral promise).
      */
     function executeRedeem(
         Order calldata order,
@@ -436,6 +456,13 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         redeemedPerBlock[block.number] += order.rusd_amount;
         redeemedPerAssetPerBlock[order.collateral_asset][block.number] += order.rusd_amount;
         // H-1: _usedNonces was already set in requestRedeem; do not double-set.
+
+        // FYP-08: burn the escrowed RUSD before paying out collateral
+        // so the supply contracts in lockstep with the backing. This
+        // contract holds the escrowed balance (transferred in by
+        // {requestRedeem}), so the plain `burn(amount)` call destroys
+        // exactly the right balance — no allowance or approval needed.
+        IRUSDBurnable(address(rusd)).burn(order.rusd_amount);
 
         IERC20(order.collateral_asset).safeTransfer(order.beneficiary, order.collateral_amount);
 

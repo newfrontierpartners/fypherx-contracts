@@ -44,6 +44,23 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     /// @notice On-chain enforced burn-to-claim delay (UTC seconds). ADR-001.
     uint64 public constant BURN_DELAY_SECONDS = 7 days;
 
+    // ── EIP-712 (FYP-07 patch) ──
+    /// @notice EIP-712 type-hash for the BurnQuote struct. Binding
+    ///         this into the signed digest gives every signature an
+    ///         action discriminator so a burn-signed quote can never
+    ///         be replayed as a settle/redeem quote in
+    ///         FyusdEpochSettlement / FyusdEpochRedemption (which use
+    ///         their own typehashes).
+    bytes32 public constant BURN_TYPEHASH = keccak256(
+        "BurnQuote(address user,address collateralAsset,uint256 rusdAmount,uint256 collateralAmount,uint256 nonce,uint256 expiry)"
+    );
+
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("FypherBurnQueue"));
+    bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
+
     // ── Types ──
 
     /// @notice Backend-signed quote. The signing scope binds (user, asset,
@@ -352,9 +369,29 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
         return _usedNonces[user][nonce];
     }
 
+    /**
+     * @notice EIP-712 struct hash for a BurnQuote — the inner hash that
+     *         is wrapped by the domain separator inside {digest}.
+     *
+     * @dev FYP-07 patch. The previous hash was a plain
+     *      `keccak256(abi.encode(quote.fields))` without any
+     *      contract / chainId binding, so the same signature could be
+     *      replayed across:
+     *      (a) sibling chains where this contract is also deployed
+     *          under the same backendSigner,
+     *      (b) any future redeployment / proxy reset on the same
+     *          chain,
+     *      (c) potentially against FyusdEpochSettlement /
+     *          FyusdEpochRedemption if their pre-patch field layouts
+     *          collided.
+     *      Including BURN_TYPEHASH gives the signature an action
+     *      discriminator; wrapping it in {_domainSeparatorV4} inside
+     *      {digest} closes the chain/contract leg.
+     */
     function hashQuote(BurnQuote calldata quote) public pure returns (bytes32) {
         return keccak256(
             abi.encode(
+                BURN_TYPEHASH,
                 quote.user,
                 quote.collateralAsset,
                 quote.rusdAmount,
@@ -365,11 +402,46 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
         );
     }
 
+    /**
+     * @notice The full EIP-712 digest that {backendSigner} must produce
+     *         (and that {_verifyQuote} authenticates against). Backend
+     *         signing code should switch from the legacy
+     *         `personal_sign(hashQuote)` to signing this exact digest.
+     */
+    function digest(BurnQuote calldata quote) external view returns (bytes32) {
+        return _digestFromStruct(hashQuote(quote));
+    }
+
+    /// @notice Live EIP-712 domain separator, recomputed per call so
+    ///         the chainId always reflects the current execution
+    ///         context.
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
+    }
+
     // ── Internal ──
 
     function _verifyQuote(BurnQuote calldata quote, bytes calldata signature) internal view {
-        bytes32 ethSignedHash = hashQuote(quote).toEthSignedMessageHash();
-        address recovered = ethSignedHash.recover(signature);
+        bytes32 d = _digestFromStruct(hashQuote(quote));
+        address recovered = d.recover(signature);
         if (recovered != backendSigner) revert InvalidSignature();
+    }
+
+    function _domainSeparatorV4() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
+    function _digestFromStruct(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(hex"19_01", _domainSeparatorV4(), structHash)
+        );
     }
 }

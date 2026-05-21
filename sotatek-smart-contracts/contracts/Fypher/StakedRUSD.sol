@@ -89,6 +89,10 @@ contract StakedRUSD is
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error AdminMismatch(address admin_);
+    /// @notice FYP-06: the immediate-exit ERC-4626 path is disabled.
+    ///         Users must exit via {cooldownAssets} / {cooldownShares}
+    ///         and {unstake} (or {earlyUnstake} with a fee).
+    error CooldownRequired();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -159,7 +163,19 @@ contract StakedRUSD is
      * @notice Total assets backing the vault for share-pricing purposes.
      *         Returns `balance(asset) - _unvestedAmount()` so the still-
      *         locked portion of a recently-distributed reward is excluded
-     *         from the share price during its 8-hour linear vesting.
+     *         from the share price during its 8-hour linear release.
+     *
+     * @dev <b>Reward semantics</b> (FYP-21 clarification). Rewards
+     *      funded via {transferInRewards} are STREAMED to whichever
+     *      addresses hold sRUSD shares during the release window —
+     *      they are NOT vested to a fixed set of pre-existing
+     *      stakers. New depositors during the window legitimately
+     *      participate in the unreleased portion as it linearly
+     *      decays. The "vestingAmount" / "_unvestedAmount" /
+     *      "VESTING_PERIOD" identifiers are retained for backend
+     *      Web3j-binding stability, but their semantics are
+     *      "unreleased rewards being streamed", not "vested cohort
+     *      attribution".
      *
      * @dev April-audit C-1 patch. The previous shape was
      *      `balance + calculateVestedAmount(...)` which (a) double-counted
@@ -221,28 +237,62 @@ contract StakedRUSD is
         return shares;
     }
 
-    function withdraw(uint256 assets, address receiver, address owner_)
+    /**
+     * @notice ERC-4626 mint() override. Mirrors {deposit} guards.
+     * @dev FYP-02 patch. The previous implementation inherited
+     *      ERC4626.mint unchanged, which let callers enter the vault
+     *      while bypassing {nonReentrant}, {whenNotPaused},
+     *      {notRestricted(receiver)}, and {userStakedAmount}
+     *      accounting. The fix is a thin pass-through that applies
+     *      the same modifier set as deposit() and posts the asset-
+     *      equivalent of the minted shares into the principal
+     *      counter.
+     */
+    function mint(uint256 shares, address receiver)
         public
         override
         nonReentrant
         whenNotPaused
+        notRestricted(receiver)
         returns (uint256)
     {
-        uint256 ret = super.withdraw(assets, receiver, owner_);
-        _debitUserStaked(owner_, assets);
-        return ret;
+        if (shares == 0) revert ZeroAmount();
+        uint256 assets = super.mint(shares, receiver);
+        userStakedAmount[receiver] += assets;
+        return assets;
     }
 
-    function redeem(uint256 shares, address receiver, address owner_)
-        public
-        override
-        nonReentrant
-        whenNotPaused
-        returns (uint256)
-    {
-        uint256 assets = super.redeem(shares, receiver, owner_);
-        _debitUserStaked(owner_, assets);
-        return assets;
+    /**
+     * @notice The immediate ERC-4626 exit is permanently disabled — all
+     *         exits must go through the cooldown silo.
+     *
+     * @dev FYP-06 patch. The previous shape simply forwarded to
+     *      `super.withdraw`, which let users skip the cooldown
+     *      entirely. The cooldown flow uses the *internal*
+     *      `_withdraw` (see {cooldownAssets}) so this override does
+     *      not affect it.
+     */
+    function withdraw(uint256, address, address) public pure override returns (uint256) {
+        revert CooldownRequired();
+    }
+
+    /// @notice Mirror of {withdraw} for the redeem entry-point. See above.
+    function redeem(uint256, address, address) public pure override returns (uint256) {
+        revert CooldownRequired();
+    }
+
+    /// @notice ERC-4626 advertisement that no immediate withdraw is
+    ///         available; integrators that respect maxWithdraw should
+    ///         skip this vault for synchronous exits and route through
+    ///         the cooldown flow instead.
+    function maxWithdraw(address) public pure override returns (uint256) {
+        return 0;
+    }
+
+    /// @notice ERC-4626 advertisement that no immediate redeem is
+    ///         available. See {maxWithdraw}.
+    function maxRedeem(address) public pure override returns (uint256) {
+        return 0;
     }
 
     /**
@@ -479,11 +529,41 @@ contract StakedRUSD is
     }
 
     // ── Internal overrides ──
+    /**
+     * @dev FYP-03 patch. The previous body was a plain pass-through to
+     *      the parent ERC20/Pausable _update, meaning an unrestricted
+     *      holder could route freshly-deposited sRUSD shares to a
+     *      restricted address by plain ERC-20 transfer. Worse, the
+     *      `userStakedAmount` mapping stayed attached to the original
+     *      depositor — off-chain dashboards that read it as "principal
+     *      stake" reported the stake on the wrong account.
+     *
+     *      We now (a) enforce the same `notRestricted(to)` gate that
+     *      {deposit} / {mint} apply, and (b) shift the proportional
+     *      asset value out of the sender's stake counter and into the
+     *      recipient's. Mint and burn paths bypass both branches —
+     *      mint accounting is done in {deposit}/{mint}, burn
+     *      accounting is done in {cooldownAssets}/{cooldownShares}
+     *      (and in legacy {_debitUserStaked} call sites). The
+     *      asset value is read at current NAV; users transferring
+     *      yield-bearing shares to another account move the
+     *      "principal" attribution along with the shares.
+     */
     function _update(
         address from,
         address to,
         uint256 value
     ) internal override(ERC20Upgradeable, ERC20PausableUpgradeable) {
+        if (from != address(0) && to != address(0)) {
+            if (settingManagement.hasRole(keccak256("FULL_RESTRICTED_STAKER_ROLE"), to))
+                revert RestrictedStaker(to);
+            if (settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), to))
+                revert RestrictedStaker(to);
+
+            uint256 assetsMoved = previewRedeem(value);
+            _debitUserStaked(from, assetsMoved);
+            userStakedAmount[to] += assetsMoved;
+        }
         super._update(from, to, value);
     }
 

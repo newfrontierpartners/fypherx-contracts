@@ -108,12 +108,22 @@ abstract contract SingleAdminAccessControl is Initializable {
      *      slot, a renounce would silently de-sync `hasRole` from
      *      `_admin` (since hasRole(bytes32(0)) reads `_admin`, not
      *      `_roles`).
+     *
+     * @dev FYP-04 patch. SOFT/FULL_RESTRICTED_STAKER_ROLE represent
+     *      admin-imposed compliance state (sanctions / KYC failure /
+     *      etc.), not user-held privileges. Allowing a restricted
+     *      account to self-revoke would let them bypass deposit/
+     *      staking gates immediately after being flagged. These roles
+     *      must only be revocable by admin via {revokeRole} or
+     *      {revokeUserRole}.
      */
     function renounceRole(bytes32 role, address account) external {
         require(account == msg.sender, "Can only renounce own role");
         require(role != bytes32(0), "Cannot renounce admin role");
         require(role != REWARDER_ROLE, "Cannot renounce REWARDER_ROLE");
         require(role != RELEASE_TOKEN_ROLE, "Cannot renounce RELEASE_TOKEN_ROLE");
+        require(role != SOFT_RESTRICTED_STAKER_ROLE, "Cannot renounce SOFT_RESTRICTED_STAKER_ROLE");
+        require(role != FULL_RESTRICTED_STAKER_ROLE, "Cannot renounce FULL_RESTRICTED_STAKER_ROLE");
         _roles[role][account] = false;
         emit RoleRevoked(role, account, msg.sender);
     }

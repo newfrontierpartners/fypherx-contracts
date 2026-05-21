@@ -98,6 +98,20 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
     /// @notice Default 10-hour request window inside the epoch.
     uint64 public constant DEFAULT_LOCK_OFFSET = 10 hours;
 
+    // ── EIP-712 (FYP-07 patch) ──
+    /// @notice EIP-712 type-hash for a RedeemQuote. Action discriminator
+    ///         that closes the cross-contract replay path against
+    ///         FypherBurnQueue / FyusdEpochSettlement.
+    bytes32 public constant REDEEM_TYPEHASH = keccak256(
+        "RedeemQuote(address user,uint256 epochId,uint256 fyusdAmount,address targetAsset,uint256 nonce,uint256 expiry)"
+    );
+
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("FyusdEpochRedemption"));
+    bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
+
     // ── Types ──
 
     enum EpochState { NONE, OPEN, LOCKED, SETTLED, DISTRIBUTED, CANCELLED }
@@ -495,9 +509,15 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
         return _usedNonces[user][nonce];
     }
 
+    /**
+     * @notice EIP-712 struct hash for a RedeemQuote.
+     * @dev FYP-07 patch. See {FypherBurnQueue.hashQuote} for the
+     *      cross-chain / cross-contract replay rationale this closes.
+     */
     function hashQuote(RedeemQuote calldata quote) public pure returns (bytes32) {
         return keccak256(
             abi.encode(
+                REDEEM_TYPEHASH,
                 quote.user,
                 quote.epochId,
                 quote.fyusdAmount,
@@ -508,11 +528,39 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
         );
     }
 
+    /// @notice Full EIP-712 digest for backend signing. See
+    ///         {FypherBurnQueue.digest} for the rollout note.
+    function digest(RedeemQuote calldata quote) external view returns (bytes32) {
+        return _digestFromStruct(hashQuote(quote));
+    }
+
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
+    }
+
     // ── Internal ──
 
     function _verifyQuote(RedeemQuote calldata quote, bytes calldata signature) internal view {
-        bytes32 ethSignedHash = hashQuote(quote).toEthSignedMessageHash();
-        address recovered = ethSignedHash.recover(signature);
+        bytes32 d = _digestFromStruct(hashQuote(quote));
+        address recovered = d.recover(signature);
         if (recovered != backendSigner) revert InvalidSignature();
+    }
+
+    function _domainSeparatorV4() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
+    function _digestFromStruct(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(hex"19_01", _domainSeparatorV4(), structHash)
+        );
     }
 }

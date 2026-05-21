@@ -85,6 +85,21 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
     ///         relative to openAt).
     uint64 public constant DEFAULT_LOCK_OFFSET = 10 hours;
 
+    // ── EIP-712 (FYP-07 patch) ──
+    /// @notice EIP-712 type-hash for a DepositQuote. Binding it into
+    ///         the digest gives the signature an action discriminator
+    ///         so a deposit-signed quote cannot be replayed against
+    ///         FypherBurnQueue / FyusdEpochRedemption.
+    bytes32 public constant DEPOSIT_TYPEHASH = keccak256(
+        "DepositQuote(address user,uint256 epochId,address collateralAsset,uint256 collateralAmount,uint256 fyusdAmount,uint256 nonce,uint256 expiry)"
+    );
+
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("FyusdEpochSettlement"));
+    bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
+
     // ── Types ──
 
     enum EpochState { NONE, OPEN, LOCKED, SETTLED, DISTRIBUTED, CANCELLED }
@@ -490,9 +505,15 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
         return _usedNonces[user][nonce];
     }
 
+    /**
+     * @notice EIP-712 struct hash for a DepositQuote.
+     * @dev FYP-07 patch. See {FypherBurnQueue.hashQuote} for the
+     *      cross-chain / cross-contract replay rationale this closes.
+     */
     function hashQuote(DepositQuote calldata quote) public pure returns (bytes32) {
         return keccak256(
             abi.encode(
+                DEPOSIT_TYPEHASH,
                 quote.user,
                 quote.epochId,
                 quote.collateralAsset,
@@ -504,11 +525,39 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
         );
     }
 
+    /// @notice Full EIP-712 digest for backend signing. See
+    ///         {FypherBurnQueue.digest} for the rollout note.
+    function digest(DepositQuote calldata quote) external view returns (bytes32) {
+        return _digestFromStruct(hashQuote(quote));
+    }
+
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
+    }
+
     // ── Internal ──
 
     function _verifyQuote(DepositQuote calldata quote, bytes calldata signature) internal view {
-        bytes32 ethSignedHash = hashQuote(quote).toEthSignedMessageHash();
-        address recovered = ethSignedHash.recover(signature);
+        bytes32 d = _digestFromStruct(hashQuote(quote));
+        address recovered = d.recover(signature);
         if (recovered != backendSigner) revert InvalidSignature();
+    }
+
+    function _domainSeparatorV4() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
+    function _digestFromStruct(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(hex"19_01", _domainSeparatorV4(), structHash)
+        );
     }
 }

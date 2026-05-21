@@ -137,12 +137,29 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
 
     // ── Admin: pool setup ──
 
+    /**
+     * @dev FYP-05 patch. Settle EVERY existing pool under the current
+     *      `totalAllocBps` before mutating it. The previous shape
+     *      only initialised the new pool's `lastAccrualBlock` to the
+     *      current block; existing pools kept their stale snapshot
+     *      and, on the next accrual, repriced their entire elapsed
+     *      window under the new (higher) `totalAllocBps`,
+     *      under-paying them. Mass-update matches the pattern already
+     *      used by {setFpyPerBlock}.
+     */
     function addPool(IERC20 underlying, uint64 weightBps) external onlyAdmin returns (uint256 poolId) {
         if (address(underlying) == address(0)) revert ZeroAddress();
         // Reject duplicate underlying — operator error guard.
         for (uint256 i = 0; i < _pools.length; ++i) {
             if (address(_pools[i].underlying) == address(underlying)) revert PoolAlreadyExists(address(underlying));
         }
+        // Settle every existing pool under the old totalAllocBps
+        // before we change it. Without this, every still-unsettled
+        // pool would later have its accrued window repriced at the
+        // new denominator (FYP-05 PoC).
+        uint256 n = _pools.length;
+        for (uint256 i = 0; i < n; ++i) _updatePool(i);
+
         _pools.push(Pool({
             underlying: underlying,
             totalStaked: 0,
@@ -156,13 +173,23 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         emit PoolAdded(poolId, address(underlying), weightBps);
     }
 
+    /**
+     * @dev FYP-05 patch. Settle EVERY pool — not just the edited one —
+     *      under the current `totalAllocBps` before mutating either
+     *      the pool's weight or the global denominator. The
+     *      previous shape only called {_updatePool(poolId)}, so other
+     *      pools' next accrual call would reprice their stale window
+     *      under the new totalAllocBps, breaking emission
+     *      conservation (FYP-05 PoC reproduces both over- and
+     *      under-payment cases).
+     */
     function setPoolWeight(uint256 poolId, uint64 newWeightBps)
         external
         onlyAdmin
         validPool(poolId)
     {
-        // Settle pending rewards under the OLD weight before changing it.
-        _updatePool(poolId);
+        uint256 n = _pools.length;
+        for (uint256 i = 0; i < n; ++i) _updatePool(i);
         Pool storage p = _pools[poolId];
         uint64 old = p.weightBps;
         totalAllocBps = totalAllocBps - old + newWeightBps;

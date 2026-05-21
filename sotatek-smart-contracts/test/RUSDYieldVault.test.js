@@ -33,7 +33,9 @@ async function deployFixture(apyBps = 600n) {
   await (await rusd.setMinter(deployer.address)).wait();
 
   const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-  const adapter = await MockAdapter.deploy(await rusd.getAddress(), apyBps);
+  // vault=0 keeps the mock in legacy free-for-all mode (see
+  // FyusdYieldVault.test.js for rationale).
+  const adapter = await MockAdapter.deploy(await rusd.getAddress(), apyBps, ethers.ZeroAddress);
 
   const Vault = await ethers.getContractFactory("RUSDYieldVault");
   const vault = await upgrades.deployProxy(Vault, [
@@ -124,7 +126,7 @@ describe("RUSDYieldVault (vRUSD ERC4626)", () => {
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const otherToken = await MockERC20.deploy("Other", "OTH", 18);
     const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-    const wrongAdapter = await MockAdapter.deploy(await otherToken.getAddress(), 100n);
+    const wrongAdapter = await MockAdapter.deploy(await otherToken.getAddress(), 100n, ethers.ZeroAddress);
     await assert.rejects(
       vault.setAdapter(await wrongAdapter.getAddress()),
       (err) => err.message.includes("AdapterAssetMismatch"),

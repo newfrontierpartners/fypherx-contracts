@@ -51,6 +51,7 @@ contract StakedFYP is
     event RewardsReceived(uint256 amount);
     event CooldownStarted(address indexed user, uint256 assets, uint256 cooldownEnd);
     event Unstaked(address indexed user, address indexed receiver, uint256 assets);
+    event EarlyUnstaked(address indexed user, address indexed receiver, uint256 assets, uint256 fee);
     event SettingManagerUpdated(address indexed newManager);
     event SettingManagerProposed(address indexed newManager, uint256 eta);
     event SettingManagerProposalCancelled(address indexed cancelledManager);
@@ -64,6 +65,10 @@ contract StakedFYP is
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error RestrictedStaker(address account);
+    /// @notice FYP-06: the immediate-exit ERC-4626 path is disabled.
+    ///         Users must exit via {cooldownAssets} / {cooldownShares}
+    ///         and {unstake} (or {earlyUnstake} with a fee).
+    error CooldownRequired();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -129,7 +134,13 @@ contract StakedFYP is
      * @notice Total assets backing the vault for share-pricing purposes.
      *         Returns `balance(asset) - _unvestedAmount()` so the still-
      *         locked portion of a recently-distributed reward is excluded
-     *         from the share price during its 8-hour linear vesting.
+     *         from the share price during its 8-hour linear release.
+     *
+     * @dev <b>Reward semantics</b> (FYP-21 clarification). Rewards are
+     *      STREAMED to current sFYP holders during the release
+     *      window, not vested to a fixed cohort. See
+     *      {StakedRUSD.totalAssets} for the full note. Identifier
+     *      names retained for ABI / backend-binding stability.
      *
      * @dev April-audit C-2 patch. The previous body returned `balance`
      *      directly, which meant that `transferInRewards(amount)`
@@ -168,21 +179,42 @@ contract StakedFYP is
         return shares;
     }
 
-    function withdraw(uint256 assets, address receiver, address owner_)
-        public override nonReentrant whenNotPaused returns (uint256)
+    /**
+     * @notice ERC-4626 mint() override. Mirrors {deposit} guards.
+     * @dev FYP-02 patch. See {StakedRUSD.mint} for the full rationale.
+     */
+    function mint(uint256 shares, address receiver)
+        public
+        override
+        nonReentrant
+        whenNotPaused
+        notRestricted(receiver)
+        returns (uint256)
     {
-        uint256 ret = super.withdraw(assets, receiver, owner_);
-        _debitUserStaked(owner_, assets);
-        return ret;
-    }
-
-    function redeem(uint256 shares, address receiver, address owner_)
-        public override nonReentrant whenNotPaused returns (uint256)
-    {
-        uint256 assets = super.redeem(shares, receiver, owner_);
-        _debitUserStaked(owner_, assets);
+        if (shares == 0) revert ZeroAmount();
+        uint256 assets = super.mint(shares, receiver);
+        userStakedAmount[receiver] += assets;
         return assets;
     }
+
+    /**
+     * @notice The immediate ERC-4626 exit is permanently disabled — all
+     *         exits must go through the cooldown silo.
+     *
+     * @dev FYP-06 patch. See {StakedRUSD.withdraw} for the full
+     *      rationale. The cooldown flow uses the internal `_withdraw`
+     *      so this override does not affect it.
+     */
+    function withdraw(uint256, address, address) public pure override returns (uint256) {
+        revert CooldownRequired();
+    }
+
+    function redeem(uint256, address, address) public pure override returns (uint256) {
+        revert CooldownRequired();
+    }
+
+    function maxWithdraw(address) public pure override returns (uint256) { return 0; }
+    function maxRedeem(address) public pure override returns (uint256) { return 0; }
 
     /**
      * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
@@ -247,6 +279,44 @@ contract StakedFYP is
         emit Unstaked(msg.sender, receiver, assets);
     }
 
+    /**
+     * @notice Skip the cooldown wait by paying the configured
+     *         `earlyUnstakeFee` to the fee receiver. The net amount is
+     *         delivered to {receiver} from the silo. Mirrors
+     *         {StakedRUSD.earlyUnstake}.
+     *
+     * @dev FYP-20 patch. The previous codebase only exposed an early-
+     *      unstake escape hatch on {StakedRUSD}; users staking FYP had
+     *      to wait the full cooldown even though the supporting
+     *      `earlyUnstakeFee` config slot already existed in
+     *      SettingManagement. Adding the symmetric entry-point closes
+     *      that asymmetry. Silo invocation uses the same `.call`
+     *      pattern as {unstake} because `silo` is held as an `address`
+     *      (vs. the typed {RUSDSilo} field in StakedRUSD).
+     */
+    function earlyUnstake(address receiver) external nonReentrant whenNotPaused {
+        UserCooldown storage cd = cooldowns[msg.sender];
+        if (cd.underlyingAmount == 0) revert NoCooldownStarted();
+
+        uint256 assets = cd.underlyingAmount;
+        uint256 fee = PoolMath.calculateFee(assets, settingManagement.getFees("earlyUnstakeFee"));
+        uint256 netAssets = assets - fee;
+        delete cooldowns[msg.sender];
+
+        (bool ok1,) = silo.call(
+            abi.encodeWithSignature("withdraw(address,uint256)", receiver, netAssets)
+        );
+        require(ok1, "Silo withdraw failed");
+        if (fee > 0) {
+            (bool ok2,) = silo.call(
+                abi.encodeWithSignature("withdraw(address,uint256)", settingManagement.getFeeReceiver(), fee)
+            );
+            require(ok2, "Silo fee withdraw failed");
+        }
+
+        emit EarlyUnstaked(msg.sender, receiver, netAssets, fee);
+    }
+
     // ── Rewards ──
     /**
      * @notice Transfer a new reward cohort into the vault. Carries any
@@ -309,9 +379,22 @@ contract StakedFYP is
     function pause() external onlyAdmin { _pause(); }
     function unpause() external onlyAdmin { _unpause(); }
 
+    /**
+     * @dev FYP-03 patch. See {StakedRUSD._update} for the rationale.
+     */
     function _update(address from, address to, uint256 value)
         internal override(ERC20Upgradeable, ERC20PausableUpgradeable)
     {
+        if (from != address(0) && to != address(0)) {
+            if (settingManagement.hasRole(keccak256("FULL_RESTRICTED_STAKER_ROLE"), to))
+                revert RestrictedStaker(to);
+            if (settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), to))
+                revert RestrictedStaker(to);
+
+            uint256 assetsMoved = previewRedeem(value);
+            _debitUserStaked(from, assetsMoved);
+            userStakedAmount[to] += assetsMoved;
+        }
         super._update(from, to, value);
     }
 

@@ -42,6 +42,18 @@ import "./IConcreteAdapter.sol";
  * FYUSD amount from the (totalAssets, totalShares) ratio and pulls
  * that amount out of Concrete to deliver to the caller.
  *
+ * <p><b>Single-tenant binding (FYP-01 / FYP-10)</b>: the adapter binds
+ * to exactly one vault address at construction. Only that vault can
+ * call {deposit} and {withdraw}, and {totalAssets} reports an
+ * internally-tracked Concrete-share balance rather than the adapter's
+ * raw `concreteVault.balanceOf(this)`. Both choices close the same
+ * class of attack: an attacker who deposits directly into the adapter
+ * (or sends Concrete shares to it) cannot inflate the vault's share
+ * price or block exits, because the vault's accounting reads only
+ * what the adapter mediated. Any excess Concrete shares parked on the
+ * adapter are recoverable only through {sweepConcreteShares} (admin-
+ * gated via the bound vault).
+ *
  * <p><b>Withdrawal mode assumption</b>: this adapter assumes Concrete
  * vault is in <i>standard</i> mode (atomic ERC-4626 withdrawals). If
  * Concrete configures the underlying vault in <i>async</i> mode (epoch-
@@ -72,6 +84,12 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     ///         generation to. Owned + curated by Concrete; we are an LP.
     IERC4626 public immutable concreteVault;
 
+    /// @notice The single vault permitted to call {deposit}/{withdraw}.
+    ///         Bound at construction; immutable so a compromised admin
+    ///         cannot redirect adapter flow to an attacker-controlled
+    ///         vault. (FYP-01 patch.)
+    address public immutable vault;
+
     /// @notice Internal share accounting per holder. Distinct from the
     ///         shares Concrete vault holds for {address(this)} — the
     ///         adapter mints its own ERC-20-style supply so the
@@ -84,24 +102,47 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     ///         can size each withdrawal proportionally.
     uint256 public totalShares;
 
+    /// @notice Concrete-vault share balance the adapter is willing to
+    ///         account for. Updated only inside {deposit}/{withdraw} so
+    ///         that direct ERC-20 transfers of Concrete shares to this
+    ///         adapter (FYP-10 attack surface) are excluded from
+    ///         {totalAssets} and cannot distort the vault's share
+    ///         pricing. Reconciliation of the excess goes through
+    ///         {sweepConcreteShares}, which is admin-gated via the
+    ///         bound vault.
+    uint256 public accountedConcreteShares;
+
     // ── Events ──
     event Deposited(address indexed caller, uint256 assetsIn, uint256 sharesMinted);
     event Withdrawn (address indexed caller, uint256 sharesBurned, uint256 assetsOut);
+    event ConcreteSharesSwept(address indexed to, uint256 amount);
 
     // ── Errors ──
     error AdapterAssetMismatch(address expected, address actual);
     error InsufficientShares(uint256 requested, uint256 available);
     error ZeroAmount();
     error ZeroAddress();
+    error NotVault();
+    error NoExcessShares();
 
-    constructor(IERC20 _fyusd, IERC4626 _concreteVault) {
+    constructor(IERC20 _fyusd, IERC4626 _concreteVault, address _vault) {
         if (address(_fyusd) == address(0)) revert ZeroAddress();
         if (address(_concreteVault) == address(0)) revert ZeroAddress();
+        if (_vault == address(0)) revert ZeroAddress();
         if (_concreteVault.asset() != address(_fyusd)) {
             revert AdapterAssetMismatch(address(_fyusd), _concreteVault.asset());
         }
         fyusd = _fyusd;
         concreteVault = _concreteVault;
+        vault = _vault;
+    }
+
+    // ── Modifiers ──
+
+    /// @notice Only the bound vault may call adapter mutators. (FYP-01.)
+    modifier onlyVault() {
+        if (msg.sender != vault) revert NotVault();
+        _;
     }
 
     // ── IConcreteAdapter ──
@@ -112,12 +153,14 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     }
 
     /// @inheritdoc IConcreteAdapter
-    /// @dev Delegates to {IERC4626.convertToAssets} on Concrete's vault.
-    ///      As Concrete's NAV grows, this number grows in lockstep —
-    ///      that's the entire yield-pass-through mechanism.
+    /// @dev Reports the asset value of the Concrete shares the adapter
+    ///      has TRACKED in {accountedConcreteShares} — NOT
+    ///      `concreteVault.balanceOf(this)`. This excludes any
+    ///      Concrete shares that landed on the adapter by direct
+    ///      transfer (FYP-10) from share-price math, so vault share
+    ///      pricing depends only on adapter-mediated activity.
     function totalAssets() public view returns (uint256) {
-        uint256 cShares = concreteVault.balanceOf(address(this));
-        return concreteVault.convertToAssets(cShares);
+        return concreteVault.convertToAssets(accountedConcreteShares);
     }
 
     /// @inheritdoc IConcreteAdapter
@@ -143,7 +186,7 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     }
 
     /// @inheritdoc IConcreteAdapter
-    /// @dev Pulls {amount} FYUSD from {msg.sender} (the FyusdYieldVault),
+    /// @dev Pulls {amount} FYUSD from {msg.sender} (the bound vault),
     ///      forwards to Concrete's vault as a deposit, mints adapter
     ///      shares to msg.sender 1:1 with the asset value at this
     ///      moment.
@@ -154,13 +197,12 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     ///      that, shares = {amount * totalShares / totalAssets} which
     ///      preserves the share-price invariant when other deposits
     ///      happen between yield accruals.
-    function deposit(uint256 amount) external returns (uint256 shares) {
+    function deposit(uint256 amount) external onlyVault returns (uint256 shares) {
         if (amount == 0) revert ZeroAmount();
 
-        // Pull underlying from the caller (typically the FyusdYieldVault
-        // contract). The caller MUST have approved address(this) for
-        // {amount} prior to this call — vault.deposit does that via
-        // forceApprove on every call.
+        // Pull underlying from the bound vault. The vault MUST have
+        // approved address(this) for {amount} prior to this call —
+        // FyusdYieldVault._deposit does that via forceApprove.
         fyusd.safeTransferFrom(msg.sender, address(this), amount);
 
         // Pre-deposit asset value drives the share-mint ratio. After
@@ -171,8 +213,14 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
 
         // Forward to Concrete. address(this) is the receiver — Concrete
         // mints its own shares to us; we hold them as our backing.
+        // Snapshot the Concrete-share delta to update our internal
+        // tracker, since {accountedConcreteShares} (not raw
+        // balanceOf) backs totalAssets going forward.
+        uint256 cBefore = concreteVault.balanceOf(address(this));
         fyusd.forceApprove(address(concreteVault), amount);
         concreteVault.deposit(amount, address(this));
+        uint256 cAfter = concreteVault.balanceOf(address(this));
+        accountedConcreteShares += (cAfter - cBefore);
 
         _shareOf[msg.sender] += shares;
         totalShares          += shares;
@@ -194,7 +242,7 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     ///      msg.sender so the upstream vault sees the asset land in its
     ///      own balance — matching the contract surface
     ///      {FyusdYieldVault._exitToCooldown} expects.
-    function withdraw(uint256 shares) external returns (uint256 amount) {
+    function withdraw(uint256 shares) external onlyVault returns (uint256 amount) {
         if (shares == 0) revert ZeroAmount();
         uint256 available = _shareOf[msg.sender];
         if (shares > available) revert InsufficientShares(shares, available);
@@ -212,9 +260,41 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
         // receiver. ERC-4626 tolerates owner == sender or owner ==
         // address(this) without allowance — we're the owner here, so no
         // allowance check fires.
+        // Snapshot the Concrete-share delta to update our internal
+        // tracker so subsequent totalAssets() readings stay correct.
+        uint256 cBefore = concreteVault.balanceOf(address(this));
         concreteVault.withdraw(amount, msg.sender, address(this));
+        uint256 cAfter = concreteVault.balanceOf(address(this));
+        uint256 burned = cBefore - cAfter;
+        // Defensive clamp: if Concrete burned fewer shares than tracked
+        // (shouldn't happen under standard ERC-4626 semantics) we
+        // saturate at 0 rather than underflow.
+        accountedConcreteShares = burned > accountedConcreteShares
+            ? 0
+            : accountedConcreteShares - burned;
 
         emit Withdrawn(msg.sender, shares, amount);
         return amount;
+    }
+
+    /**
+     * @notice Recovery hatch for Concrete shares that landed on the
+     *         adapter outside of {deposit} — direct ERC-20 transfers,
+     *         airdrops, or operator mistakes. The excess (raw balance
+     *         minus accounted) is forwarded to {to}. The bound vault's
+     *         admin chain authorises the call (we delegate the
+     *         authorisation to the vault rather than re-implementing
+     *         a role check, so the adapter stays minimal).
+     *
+     * @dev FYP-10 patch. Without this hatch, untracked Concrete shares
+     *      would be permanently locked.
+     */
+    function sweepConcreteShares(address to) external onlyVault returns (uint256 amount) {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 raw = concreteVault.balanceOf(address(this));
+        if (raw <= accountedConcreteShares) revert NoExcessShares();
+        amount = raw - accountedConcreteShares;
+        IERC20(address(concreteVault)).safeTransfer(to, amount);
+        emit ConcreteSharesSwept(to, amount);
     }
 }

@@ -34,6 +34,13 @@ contract MockConcreteAdapter is IConcreteAdapter {
     IERC20 public immutable fyusd;
     /// @notice Annualised yield rate in basis points. 400 = 4% APY.
     uint256 public immutable apyBps;
+    /// @notice Optional single-tenant binding. When non-zero, only this
+    ///         address may call {deposit}/{withdraw}, mirroring the
+    ///         post-FYP-01 ConcreteAdapterV1 access model. Setting it to
+    ///         zero in the constructor keeps the legacy free-for-all
+    ///         behaviour for ad-hoc unit tests that exercise the adapter
+    ///         in isolation.
+    address public immutable vault;
 
     /// @notice Total FYUSD principal deposited (excluding simulated yield).
     uint256 public principal;
@@ -55,11 +62,27 @@ contract MockConcreteAdapter is IConcreteAdapter {
     error InsufficientLiquidity(uint256 have, uint256 want);
     error ZeroAmount();
     error InsufficientShares(uint256 have, uint256 want);
+    error NotVault();
 
-    constructor(IERC20 _fyusd, uint256 _apyBps) {
+    /// @notice Pass {_vault} non-zero to enforce the same single-tenant
+    ///         access model as ConcreteAdapterV1, which is what
+    ///         production-shape integration tests want. Pass
+    ///         address(0) to keep the legacy free-for-all behaviour
+    ///         for ad-hoc unit tests that exercise the adapter in
+    ///         isolation.
+    constructor(IERC20 _fyusd, uint256 _apyBps, address _vault) {
         fyusd = _fyusd;
         apyBps = _apyBps;
         lastAccrualAt = uint64(block.timestamp);
+        vault = _vault;
+    }
+
+    /// @dev Only the bound vault (if any) may call adapter mutators.
+    ///      When {vault} == address(0) the modifier is a no-op so legacy
+    ///      ad-hoc unit tests keep working.
+    modifier onlyVault() {
+        if (vault != address(0) && msg.sender != vault) revert NotVault();
+        _;
     }
 
     function asset() external view returns (address) {
@@ -81,7 +104,7 @@ contract MockConcreteAdapter is IConcreteAdapter {
         return apyBps;
     }
 
-    function deposit(uint256 fyusdAmount) external returns (uint256 shares) {
+    function deposit(uint256 fyusdAmount) external onlyVault returns (uint256 shares) {
         if (fyusdAmount == 0) revert ZeroAmount();
         _accrue();
         // Share/principal ratio: if no prior holders, 1:1; else preserve
@@ -97,7 +120,7 @@ contract MockConcreteAdapter is IConcreteAdapter {
         emit Deposited(msg.sender, fyusdAmount, shares);
     }
 
-    function withdraw(uint256 shares) external returns (uint256 fyusdAmount) {
+    function withdraw(uint256 shares) external onlyVault returns (uint256 fyusdAmount) {
         if (shares == 0) revert ZeroAmount();
         if (_shares[msg.sender] < shares) revert InsufficientShares(_shares[msg.sender], shares);
         _accrue();

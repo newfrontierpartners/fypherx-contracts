@@ -24,6 +24,15 @@ interface IFYUSDPermit {
     ) external;
 }
 
+/// @dev Optional extension on {IConcreteAdapter}. ConcreteAdapterV1
+///      implements this; legacy mock adapters may not. Only consumed by
+///      {sweepAdapterConcreteShares} which is admin-gated, so a mock
+///      that lacks the entry-point simply leaves the sweep call
+///      reverting — acceptable for test scaffolds.
+interface IConcreteAdapterSweepable {
+    function sweepConcreteShares(address to) external returns (uint256 amount);
+}
+
 /**
  * @title FyusdYieldVault (vFYUSD)
  * @notice ERC4626 receipt-token vault for the Concrete-backed FYUSD yield
@@ -100,6 +109,7 @@ contract FyusdYieldVault is
     error ZeroAddress();
     error AdapterAssetMismatch(address vault, address adapter);
     error AdapterReturnedShort(uint256 expected, uint256 received);
+    error AdapterStillHoldsShares(uint256 shares);
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error AdminMismatch(address admin_);
@@ -313,18 +323,45 @@ contract FyusdYieldVault is
     }
 
     // ── Admin ──
+    /**
+     * @dev FYP-09 patch. The previous shape blindly rebound the
+     *      adapter, orphaning every asset still parked in the old
+     *      adapter (since totalAssets() reads from the new, empty one
+     *      and adapter.withdraw on the new adapter has no record of
+     *      our shares). The NatSpec referenced an emergencyMigrate
+     *      step that never existed.
+     *
+     *      We now require `oldAdapter.shareOf(this) == 0` before any
+     *      rebind — operators must first drain the existing adapter
+     *      (e.g. via the standard cooldown flow, an admin-staged
+     *      `withdrawAll` helper, or a future emergencyMigrate hook
+     *      added in tandem) so the share-state invariant
+     *      `totalSupply == adapter.shareOf(vault)` is never broken
+     *      across the rebind.
+     */
     function setAdapter(IConcreteAdapter newAdapter) external onlyAdmin {
         if (address(newAdapter) == address(0)) revert ZeroAddress();
         if (newAdapter.asset() != asset()) {
             revert AdapterAssetMismatch(asset(), newAdapter.asset());
         }
-        // Migration to a v2 adapter is intentionally NOT automated — admin
-        // must coordinate the asset move via an emergencyMigrate step
-        // before flipping the binding. This keeps the share-state
-        // invariant (totalSupply == adapter.shareOf(vault)) under the
-        // operator's control.
+        if (adapter.shareOf(address(this)) != 0) {
+            revert AdapterStillHoldsShares(adapter.shareOf(address(this)));
+        }
         emit AdapterUpdated(address(adapter), address(newAdapter));
         adapter = newAdapter;
+    }
+
+    /**
+     * @notice Admin recovery hatch for Concrete shares that landed on
+     *         the adapter outside of the deposit path. Forwards the
+     *         excess to {to}. Admin-only — we proxy the call through
+     *         the vault because ConcreteAdapterV1 binds its
+     *         {sweepConcreteShares} entry-point to msg.sender == this
+     *         vault.
+     */
+    function sweepAdapterConcreteShares(address to) external onlyAdmin returns (uint256 swept) {
+        if (to == address(0)) revert ZeroAddress();
+        return IConcreteAdapterSweepable(address(adapter)).sweepConcreteShares(to);
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {

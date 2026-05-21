@@ -46,7 +46,9 @@ async function deployFixture() {
 
   // FyusdYieldVault (target 2).
   const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-  const adapter = await MockAdapter.deploy(await fyusd.getAddress(), 0n);
+  // vault=0 keeps the mock in legacy free-for-all mode; the breaker
+  // test doesn't exercise the single-tenant FYP-01 path.
+  const adapter = await MockAdapter.deploy(await fyusd.getAddress(), 0n, ethers.ZeroAddress);
   const Vault = await ethers.getContractFactory("FyusdYieldVault");
   const vault = await upgrades.deployProxy(Vault, [
     await setting.getAddress(),

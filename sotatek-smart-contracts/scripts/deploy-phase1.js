@@ -128,7 +128,11 @@ async function main() {
   if (!addrs.MockConcreteAdapter) {
     console.log("── Deploy MockConcreteAdapter ──");
     const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-    const adapter = await MockAdapter.deploy(addrs.FYUSD, DEFAULT_MOCK_CONCRETE_APY_BPS);
+    // vault=0 = legacy free-for-all mode. The post-FYP-01 single-tenant
+    // model is only enforced by the production ConcreteAdapterV1; the
+    // mock keeps free-for-all so this monolithic script can deploy the
+    // adapter before the vault proxy without a two-step bind.
+    const adapter = await MockAdapter.deploy(addrs.FYUSD, DEFAULT_MOCK_CONCRETE_APY_BPS, ethers.ZeroAddress);
     await adapter.waitForDeployment();
     addrs.MockConcreteAdapter = await adapter.getAddress();
     console.log(`  ✓ MockConcreteAdapter @ ${addrs.MockConcreteAdapter}  (apy = ${DEFAULT_MOCK_CONCRETE_APY_BPS} bps)`);

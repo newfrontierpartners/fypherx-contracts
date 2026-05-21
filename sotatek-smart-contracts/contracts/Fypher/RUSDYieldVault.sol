@@ -24,6 +24,14 @@ interface IRUSDPermit {
     ) external;
 }
 
+/// @dev Optional extension on {IConcreteAdapter}. ConcreteAdapterV1
+///      implements this; legacy mock adapters may not. See
+///      {FyusdYieldVault} for the same interface — kept duplicated
+///      to avoid cross-contract imports.
+interface IConcreteAdapterSweepable {
+    function sweepConcreteShares(address to) external returns (uint256 amount);
+}
+
 /**
  * @title RUSDYieldVault (vRUSD)
  * @notice ERC4626 receipt-token vault for the Concrete-backed RUSD yield
@@ -86,6 +94,7 @@ contract RUSDYieldVault is
     error ZeroAddress();
     error AdapterAssetMismatch(address vault, address adapter);
     error AdapterReturnedShort(uint256 expected, uint256 received);
+    error AdapterStillHoldsShares(uint256 shares);
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error AdminMismatch(address admin_);
@@ -252,13 +261,29 @@ contract RUSDYieldVault is
     }
 
     // ── Admin ──
+    /**
+     * @dev FYP-09 patch. See {FyusdYieldVault.setAdapter} for the
+     *      full rationale — the precondition prevents an admin rebind
+     *      from orphaning principal still parked in the old adapter.
+     */
     function setAdapter(IConcreteAdapter newAdapter) external onlyAdmin {
         if (address(newAdapter) == address(0)) revert ZeroAddress();
         if (newAdapter.asset() != asset()) {
             revert AdapterAssetMismatch(asset(), newAdapter.asset());
         }
+        if (adapter.shareOf(address(this)) != 0) {
+            revert AdapterStillHoldsShares(adapter.shareOf(address(this)));
+        }
         emit AdapterUpdated(address(adapter), address(newAdapter));
         adapter = newAdapter;
+    }
+
+    /// @notice Admin recovery hatch for Concrete shares parked on the
+    ///         adapter outside of the deposit path. See
+    ///         {FyusdYieldVault.sweepAdapterConcreteShares} for design.
+    function sweepAdapterConcreteShares(address to) external onlyAdmin returns (uint256 swept) {
+        if (to == address(0)) revert ZeroAddress();
+        return IConcreteAdapterSweepable(address(adapter)).sweepConcreteShares(to);
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {

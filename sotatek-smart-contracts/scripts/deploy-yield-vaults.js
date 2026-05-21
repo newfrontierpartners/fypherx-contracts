@@ -103,7 +103,9 @@ async function main() {
   if (!addrs[KEY_FYUSD_ADAPTER]) {
     console.log(`── Deploy ${KEY_FYUSD_ADAPTER} ──`);
     const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-    const adapter = await MockAdapter.deploy(addrs.FYUSD, DEFAULT_MOCK_CONCRETE_APY_BPS);
+    // vault=0 keeps the mock in legacy free-for-all mode (see
+    // deploy-phase1.js for rationale).
+    const adapter = await MockAdapter.deploy(addrs.FYUSD, DEFAULT_MOCK_CONCRETE_APY_BPS, ethers.ZeroAddress);
     await adapter.waitForDeployment();
     addrs[KEY_FYUSD_ADAPTER] = await adapter.getAddress();
     console.log(`  ✓ ${KEY_FYUSD_ADAPTER} @ ${addrs[KEY_FYUSD_ADAPTER]} (apy = ${DEFAULT_MOCK_CONCRETE_APY_BPS} bps)`);
@@ -115,7 +117,9 @@ async function main() {
   if (!addrs[KEY_RUSD_ADAPTER]) {
     console.log(`── Deploy ${KEY_RUSD_ADAPTER} ──`);
     const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-    const adapter = await MockAdapter.deploy(addrs.RUSD, DEFAULT_MOCK_CONCRETE_APY_BPS);
+    // vault=0 keeps the mock in legacy free-for-all mode (see
+    // deploy-phase1.js for rationale).
+    const adapter = await MockAdapter.deploy(addrs.RUSD, DEFAULT_MOCK_CONCRETE_APY_BPS, ethers.ZeroAddress);
     await adapter.waitForDeployment();
     addrs[KEY_RUSD_ADAPTER] = await adapter.getAddress();
     console.log(`  ✓ ${KEY_RUSD_ADAPTER} @ ${addrs[KEY_RUSD_ADAPTER]} (apy = ${DEFAULT_MOCK_CONCRETE_APY_BPS} bps)`);
