@@ -25,11 +25,32 @@ interface IConcreteAdapter {
     function deposit(uint256 fyusdAmount) external returns (uint256 shares);
 
     /**
-     * @notice Burn `shares` from the caller (vault) and withdraw the
-     *         corresponding FYUSD principal + accrued yield back to the
-     *         caller.
+     * @notice Withdraw `fyusdAmount` of underlying back to the caller
+     *         (the bound vault). The adapter burns as many of its own
+     *         internal shares as needed (ceil-rounded) to cover the
+     *         requested asset amount.
+     *
+     * @dev FYP-41 patch. The signature is unchanged (selector
+     *      `withdraw(uint256)`) but the parameter semantics flipped
+     *      from "burn this many adapter-shares, return whatever
+     *      assets that's worth" to "release this many assets, burn
+     *      whatever adapter-shares are needed". The previous
+     *      shares-in-shares-out shape required the vault's ERC4626
+     *      share count to track the adapter's internal share count
+     *      1:1, which the OZ ERC4626 inflation-protection math
+     *      (`+1` / `+offset` correction) does not guarantee — the
+     *      two could diverge by rounding and the vault would then
+     *      over- or under-withdraw against the adapter. Asset-based
+     *      withdraw lets the vault stay the single source of share
+     *      accounting while the adapter handles only asset movement.
+     *
+     * @return fyusdAmount The amount actually delivered to the
+     *         caller. Implementations MAY deliver more than the
+     *         requested amount if Concrete's underlying ERC-4626
+     *         math rounds the share-burn upward; callers should
+     *         check the return value rather than assuming equality.
      */
-    function withdraw(uint256 shares) external returns (uint256 fyusdAmount);
+    function withdraw(uint256 fyusdAmount) external returns (uint256);
 
     /**
      * @notice Total FYUSD currently controlled by the adapter (principal

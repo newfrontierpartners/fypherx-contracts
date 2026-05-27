@@ -276,22 +276,31 @@ contract FyusdYieldVault is
     }
 
     /**
-     * @dev Burn `shares` from `user`, withdraw the equivalent FYUSD from
-     *      the adapter, transfer it to the silo, and add `assets` to the
-     *      user's outstanding cooldown bucket.
+     * @dev Burn `shares` from `user`, withdraw the requested FYUSD
+     *      amount from the adapter, transfer it to the silo, and add
+     *      it to the user's outstanding cooldown bucket.
      *
-     *      Vault shares track adapter shares 1:1 (see {totalAssets}
-     *      docstring). We therefore call `adapter.withdraw(shares)` —
-     *      not `adapter.withdraw(assets)` — so the share-burn stays in
-     *      lockstep with the vToken burn.
+     * @dev FYP-41 patch. We now call `adapter.withdraw(assets)`
+     *      instead of `adapter.withdraw(shares)`. The previous shape
+     *      assumed vault-shares and adapter-shares stayed 1:1, but
+     *      the OZ ERC4626 inflation-protection math (`+1` / `+offset`
+     *      correction) does not guarantee this; the two share
+     *      counters could drift by rounding, and passing the vault-
+     *      share count to an adapter that interprets it as adapter-
+     *      shares burned the wrong number of Concrete shares,
+     *      enabling the share-pricing-drain class of bug CertiK's
+     *      FYP-41 PoC reproduced. The adapter is now asset-based
+     *      (it computes the share burn count internally,
+     *      ceil-rounded) so the vault stays the single source of
+     *      share accounting.
      *
-     *      The adapter MUST return at least `assets` FYUSD (its own
-     *      `previewRedeem`-equivalent matches ours). We verify defensively;
-     *      a short return signals an adapter accounting bug or NAV race.
+     *      The adapter MUST return at least `assets` FYUSD. We
+     *      verify defensively; a short return signals an adapter
+     *      accounting bug or NAV race.
      */
     function _exitToCooldown(address user, uint256 assets, uint256 shares) internal {
         _burn(user, shares);
-        uint256 received = adapter.withdraw(shares);
+        uint256 received = adapter.withdraw(assets);
         if (received < assets) revert AdapterReturnedShort(assets, received);
 
         IERC20(asset()).safeTransfer(address(silo), received);

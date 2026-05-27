@@ -167,6 +167,26 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
     ///         leaving open epochs that have already settled claimable.
     bool public settlementPaused;
 
+    // ── Storage append (FYP-47 patch — APPEND-ONLY for proxy safety) ──
+    /**
+     * @notice Per-epoch count of unique users that booked entitlement
+     *         (incremented on the first {deposit} per (epochId, user)).
+     *         Pairs with {numClaimed} so the DISTRIBUTED transition is
+     *         "every claimant has been paid" rather than "the
+     *         floor-rounded sum of payouts equals fyusdMinted" (the
+     *         latter was effectively unreachable for multi-claimant
+     *         epochs because of pro-rata rounding — see FYP-13).
+     */
+    mapping(uint256 => uint256) public numClaimers;
+    /**
+     * @notice Per-epoch count of successful {claim} calls against
+     *         {numClaimers}. The DISTRIBUTED transition fires when
+     *         {numClaimed} == {numClaimers}, and the last claimer
+     *         absorbs the rounding residue so the contract is left
+     *         with zero stranded FYUSD (FYP-13).
+     */
+    mapping(uint256 => uint256) public numClaimed;
+
     // ── Events ──
 
     event EpochOpened(uint256 indexed epochId, uint64 openAt, uint64 lockAt, uint64 endAt);
@@ -229,6 +249,10 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
     ///         another is still OPEN (admins should let the previous
     ///         epoch lock first, or cancel it explicitly).
     error AnotherEpochOpen(uint256 openEpochId);
+    /// @notice FYP-59: the settlement window is still open — the
+    ///         permissionless {forceCancel} only fires after
+    ///         `block.timestamp > endAt`.
+    error SettlementWindowActive(uint64 endAt);
 
     // ── Init ──
 
@@ -393,6 +417,39 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
     }
 
     /**
+     * @notice Permissionless timeout-based cancellation. After
+     *         `block.timestamp > endAt`, anyone can flip a LOCKED
+     *         epoch to CANCELLED so depositors can claim refunds
+     *         without waiting on a privileged operator.
+     *
+     * @dev FYP-59 patch. Pre-patch, a LOCKED epoch that never got
+     *      {settleEpoch}'d or {cancelEpoch}'d (e.g. Bitgo SLA
+     *      breach, executor key compromised, multisig unresponsive)
+     *      left depositors trapped with no on-chain recovery path.
+     *      The new entry-point uses the epoch's own configured
+     *      {endAt} timestamp as the deadline, so the operator
+     *      still controls the SLA bound via {openEpoch}; once that
+     *      bound is crossed without settlement, the cancel becomes
+     *      permissionless.
+     *
+     *      Only LOCKED is eligible: OPEN epochs still have an
+     *      active deposit window (lockEpoch can advance), and
+     *      SETTLED / DISTRIBUTED have already paid out.
+     *      `reasonHash` is fixed to `keccak256("FORCE_CANCEL_TIMEOUT")`
+     *      to make the audit ledger distinguish operator-initiated
+     *      cancellations from timeout-triggered ones.
+     */
+    function forceCancel(uint256 epochId) external {
+        Epoch storage e = epochs[epochId];
+        if (e.state == EpochState.NONE) revert EpochNotFound(epochId);
+        if (e.state != EpochState.LOCKED) revert InvalidState(EpochState.LOCKED, e.state);
+        if (block.timestamp <= e.endAt) revert SettlementWindowActive(e.endAt);
+
+        e.state = EpochState.CANCELLED;
+        emit EpochCancelled(epochId, keccak256("FORCE_CANCEL_TIMEOUT"));
+    }
+
+    /**
      * @notice Sweep `amount` of `asset` out of the contract into `to`.
      *         Admin-only and restricted to SETTLED or DISTRIBUTED epochs
      *         so the path cannot interfere with a CANCELLED epoch's
@@ -486,6 +543,14 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
         // deposits — caller (backend) must enforce single-asset per user.
         // If a user wants to deposit multiple assets they should use
         // separate epoch entries.
+        // FYP-47 patch: track unique claimants by checking whether the
+        // user has any prior entitlement booked in this epoch. The
+        // increment runs BEFORE the entitlement update so the "first
+        // deposit by this user" branch fires exactly once.
+        if (fyusdEntitled[quote.epochId][quote.user] == 0) {
+            numClaimers[quote.epochId] += 1;
+        }
+
         if (depositedAsset[quote.epochId][quote.user] == address(0)) {
             depositedAsset[quote.epochId][quote.user] = quote.collateralAsset;
         } else if (depositedAsset[quote.epochId][quote.user] != quote.collateralAsset) {
@@ -521,20 +586,60 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
      *         Under perfect settlement (fyusdMinted == totalFyusdEntitled)
      *         this collapses to `entitled`.
      */
+    /**
+     * @dev FYP-13 + FYP-47 patch. The previous implementation paid each
+     *      claimant `entitled * fyusdMinted / totalEntitled` with floor
+     *      division, so the sum of payouts was almost always strictly
+     *      less than `fyusdMinted` for multi-claimant epochs — leaving
+     *      FYUSD dust in the contract and the state machine stuck in
+     *      SETTLED forever (the transition gate required strict
+     *      equality with `fyusdMinted`). Two changes:
+     *
+     *      (1) The LAST claimant in the epoch receives the residue:
+     *          `payout = fyusdMinted - fyusdDistributed`. Detection is
+     *          via `numClaimed + 1 == numClaimers`. This guarantees
+     *          `sum(payouts) == fyusdMinted` exactly, no stranded dust.
+     *
+     *      (2) Claims are only accepted in SETTLED (and CANCELLED for
+     *          refunds). DISTRIBUTED is now a terminal "all paid" state
+     *          — future code that treats DISTRIBUTED as a final
+     *          accounting point can do so safely. Pre-patch claim()
+     *          accepted DISTRIBUTED too, which combined with the
+     *          fyusdMinted == 0 footgun (now blocked by FYP-30) let
+     *          the state advance prematurely and silently zero-pay
+     *          later claimants. Even with the FYP-30 zero-mint gate
+     *          in place, restricting claim() to SETTLED keeps the
+     *          state-machine semantics crisp.
+     */
     function claim(uint256 epochId, address user) external nonReentrant {
         Epoch storage e = epochs[epochId];
         if (e.state == EpochState.NONE) revert EpochNotFound(epochId);
         if (claimed[epochId][user]) revert AlreadyClaimed();
 
-        if (e.state == EpochState.SETTLED || e.state == EpochState.DISTRIBUTED) {
+        if (e.state == EpochState.SETTLED) {
             uint256 entitled = fyusdEntitled[epochId][user];
             if (entitled == 0) revert NothingToClaim();
+
+            uint256 payout;
+            uint256 alreadyClaimed = numClaimed[epochId];
+            uint256 totalClaimers = numClaimers[epochId];
+            // Last claimant absorbs the floor-division residue so no
+            // FYUSD is stranded. The `totalClaimers > 0` guard is
+            // belt-and-braces — entitled > 0 already implies there
+            // was a deposit, which would have incremented the counter.
+            if (totalClaimers > 0 && alreadyClaimed + 1 == totalClaimers) {
+                payout = e.fyusdMinted - e.fyusdDistributed;
+            } else {
+                payout = e.totalFyusdEntitled == 0
+                    ? 0
+                    : (entitled * e.fyusdMinted) / e.totalFyusdEntitled;
+            }
+
             claimed[epochId][user] = true;
-            uint256 payout = e.totalFyusdEntitled == 0
-                ? 0
-                : (entitled * e.fyusdMinted) / e.totalFyusdEntitled;
+            numClaimed[epochId] = alreadyClaimed + 1;
             e.fyusdDistributed += payout;
-            if (e.fyusdDistributed == e.fyusdMinted && e.state == EpochState.SETTLED) {
+            // Transition once every booked claimant has been paid.
+            if (alreadyClaimed + 1 == totalClaimers) {
                 e.state = EpochState.DISTRIBUTED;
             }
             if (payout > 0) {
@@ -549,6 +654,7 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
             IERC20(asset).safeTransfer(user, amount);
             emit Refunded(epochId, user, asset, amount);
         } else {
+            // FYP-47: DISTRIBUTED is terminal — no more claims.
             revert InvalidState(EpochState.SETTLED, e.state);
         }
     }

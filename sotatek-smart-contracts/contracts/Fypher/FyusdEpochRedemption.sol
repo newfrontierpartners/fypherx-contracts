@@ -173,6 +173,15 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
     /// @notice ADR-008 settlement-side pause: blocks {settleEpoch}.
     bool public settlementPaused;
 
+    // ── Storage append (FYP-47 patch — APPEND-ONLY for proxy safety) ──
+    /// @notice Per-epoch count of unique requesters (incremented on the
+    ///         first {requestRedeem} per (epochId, user)). See
+    ///         {FyusdEpochSettlement.numClaimers}.
+    mapping(uint256 => uint256) public numClaimers;
+    /// @notice Per-epoch successful claim counter. The DISTRIBUTED
+    ///         transition fires when {numClaimed} == {numClaimers}.
+    mapping(uint256 => uint256) public numClaimed;
+
     // ── Events ──
 
     event EpochOpened(uint256 indexed epochId, uint64 openAt, uint64 lockAt, uint64 endAt);
@@ -237,6 +246,10 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
     /// @notice FYP-30: a user's targetAsset must be stable across
     ///         every request inside the same epoch.
     error TargetAssetMismatch(address pinned, address provided);
+    /// @notice FYP-59: the settlement window is still open — the
+    ///         permissionless {forceCancel} only fires after
+    ///         `block.timestamp > endAt`.
+    error SettlementWindowActive(uint64 endAt);
 
     // ── Init ──
 
@@ -389,6 +402,29 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
         emit EpochCancelled(epochId, reasonHash);
     }
 
+    /**
+     * @notice Permissionless timeout-based cancellation, mirror of
+     *         {FyusdEpochSettlement.forceCancel}. After
+     *         `block.timestamp > endAt`, anyone can flip a LOCKED
+     *         epoch to CANCELLED so users can {claim} back their
+     *         escrowed FYUSD.
+     *
+     * @dev FYP-59 patch. Pre-patch, a LOCKED epoch with no
+     *      settleEpoch / cancelEpoch within its lifecycle window
+     *      trapped escrowed FYUSD indefinitely. See
+     *      {FyusdEpochSettlement.forceCancel} for the full rationale
+     *      — the redemption-side path is symmetric.
+     */
+    function forceCancel(uint256 epochId) external {
+        Epoch storage e = epochs[epochId];
+        if (e.state == EpochState.NONE) revert EpochNotFound(epochId);
+        if (e.state != EpochState.LOCKED) revert InvalidState(EpochState.LOCKED, e.state);
+        if (block.timestamp <= e.endAt) revert SettlementWindowActive(e.endAt);
+
+        e.state = EpochState.CANCELLED;
+        emit EpochCancelled(epochId, keccak256("FORCE_CANCEL_TIMEOUT"));
+    }
+
     // ── Request ──
 
     /**
@@ -420,6 +456,13 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
 
         // Escrow the FYUSD (later burned at settle, refunded on cancel).
         IERC20(address(fyusd)).safeTransferFrom(quote.user, address(this), quote.fyusdAmount);
+
+        // FYP-47 patch: track unique requesters. Increment exactly once
+        // per (epochId, user) — on the first call when the user has no
+        // prior request booked.
+        if (fyusdRequested[quote.epochId][quote.user] == 0) {
+            numClaimers[quote.epochId] += 1;
+        }
 
         // Multi-request per (epoch, user) is allowed; sum the requested
         // amount. targetAsset is recorded only on the first request and
@@ -456,23 +499,39 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
      *         Under perfect settlement at par this collapses to "what the
      *         user redeemed for".
      */
+    /**
+     * @dev FYP-13 + FYP-47 patch. See {FyusdEpochSettlement.claim} for
+     *      the full rationale — pro-rata floor division left collateral
+     *      dust in the contract and the state machine stuck in SETTLED.
+     *      The last claimant in the epoch now absorbs the residue
+     *      (`payout = totalCollateralPaid - collateralDistributed`)
+     *      and claims are restricted to SETTLED (DISTRIBUTED is
+     *      terminal).
+     */
     function claim(uint256 epochId, address user) external nonReentrant {
         Epoch storage e = epochs[epochId];
         if (e.state == EpochState.NONE) revert EpochNotFound(epochId);
         if (claimed[epochId][user]) revert AlreadyClaimed();
 
-        if (e.state == EpochState.SETTLED || e.state == EpochState.DISTRIBUTED) {
+        if (e.state == EpochState.SETTLED) {
             uint256 requested = fyusdRequested[epochId][user];
             if (requested == 0) revert NothingToClaim();
+
+            uint256 payout;
+            uint256 alreadyClaimed = numClaimed[epochId];
+            uint256 totalClaimers = numClaimers[epochId];
+            if (totalClaimers > 0 && alreadyClaimed + 1 == totalClaimers) {
+                payout = e.totalCollateralPaid - e.collateralDistributed;
+            } else {
+                payout = e.totalFyusdRequested == 0
+                    ? 0
+                    : (requested * e.totalCollateralPaid) / e.totalFyusdRequested;
+            }
+
             claimed[epochId][user] = true;
-            uint256 payout = e.totalFyusdRequested == 0
-                ? 0
-                : (requested * e.totalCollateralPaid) / e.totalFyusdRequested;
+            numClaimed[epochId] = alreadyClaimed + 1;
             e.collateralDistributed += payout;
-            if (
-                e.state == EpochState.SETTLED &&
-                e.collateralDistributed == e.totalCollateralPaid
-            ) {
+            if (alreadyClaimed + 1 == totalClaimers) {
                 e.state = EpochState.DISTRIBUTED;
             }
             if (payout > 0) {
@@ -486,6 +545,7 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
             IERC20(address(fyusd)).safeTransfer(user, amount);
             emit Refunded(epochId, user, amount);
         } else {
+            // FYP-47: DISTRIBUTED is terminal — no more claims.
             revert InvalidState(EpochState.SETTLED, e.state);
         }
     }

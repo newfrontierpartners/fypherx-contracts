@@ -4,6 +4,7 @@ pragma solidity ^0.8.22;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./IConcreteAdapter.sol";
 
 /**
@@ -124,6 +125,9 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     error ZeroAddress();
     error NotVault();
     error NoExcessShares();
+    /// @notice FYP-41: caller asked for more underlying than the adapter
+    ///         currently controls via Concrete (totalAssets).
+    error InsufficientAssets(uint256 requested, uint256 available);
 
     constructor(IERC20 _fyusd, IERC4626 _concreteVault, address _vault) {
         if (address(_fyusd) == address(0)) revert ZeroAddress();
@@ -230,51 +234,54 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     }
 
     /// @inheritdoc IConcreteAdapter
-    /// @dev Burns {shares} from {msg.sender}, computes the proportional
-    ///      FYUSD amount they're entitled to from
-    ///      {totalAssets * shares / totalShares}, and pulls that amount
-    ///      out of Concrete directly to the caller.
+    /// @dev FYP-41 patch. The parameter is now `fyusdAmount`
+    ///      (asset-based), not adapter-shares. The adapter computes
+    ///      how many of its own internal shares back the requested
+    ///      asset amount (`ceildiv(amount * totalShares, totalAssets)`)
+    ///      and burns at least that many. This lets the upstream
+    ///      vault stay the single source of share accounting (the
+    ///      adapter's internal `_shareOf` map only matters for ops
+    ///      dashboards now) and removes the divergence-then-drain
+    ///      class of bug CertiK's FYP-41 PoC reproduced.
     ///
     ///      <p>Concrete's {IERC4626.withdraw} burns enough Concrete-
     ///      vault shares to release the requested asset amount; the
-    ///      adapter doesn't need to compute a Concrete-share burn count
-    ///      manually. The {receiver} parameter forwards FYUSD to
-    ///      msg.sender so the upstream vault sees the asset land in its
-    ///      own balance — matching the contract surface
-    ///      {FyusdYieldVault._exitToCooldown} expects.
-    function withdraw(uint256 shares) external onlyVault returns (uint256 amount) {
-        if (shares == 0) revert ZeroAmount();
+    ///      adapter mirrors that contract with the {receiver}
+    ///      argument set to `msg.sender` so the upstream vault sees
+    ///      the asset land in its own balance.
+    function withdraw(uint256 fyusdAmount) external onlyVault returns (uint256) {
+        if (fyusdAmount == 0) revert ZeroAmount();
+        uint256 ta = totalAssets();
+        if (ta == 0 || totalShares == 0) revert InsufficientAssets(fyusdAmount, ta);
+        if (fyusdAmount > ta) revert InsufficientAssets(fyusdAmount, ta);
+
+        // Ceil-divide so the burn never under-charges shares for the
+        // delivered asset amount. Worst-case rounding gives the caller
+        // up to (1 / totalShares) wei of extra asset value, which is
+        // negligible at any realistic scale.
+        uint256 burnShares = Math.ceilDiv(fyusdAmount * totalShares, ta);
         uint256 available = _shareOf[msg.sender];
-        if (shares > available) revert InsufficientShares(shares, available);
+        if (burnShares > available) revert InsufficientShares(burnShares, available);
 
-        // Compute proportional asset amount BEFORE updating totalShares —
-        // the math depends on the pre-burn ratio. Order matters under the
-        // CEI pattern (compute → state-update → external-call).
-        amount = (totalAssets() * shares) / totalShares;
-
-        _shareOf[msg.sender] = available - shares;
-        totalShares         -= shares;
+        _shareOf[msg.sender] = available - burnShares;
+        totalShares         -= burnShares;
 
         // Pull from Concrete to msg.sender. address(this) is the share
-        // owner (we hold the Concrete shares). msg.sender is the FYUSD
-        // receiver. ERC-4626 tolerates owner == sender or owner ==
-        // address(this) without allowance — we're the owner here, so no
-        // allowance check fires.
+        // owner (we hold the Concrete shares); msg.sender (the bound
+        // vault) is the FYUSD receiver. ERC-4626 tolerates owner ==
+        // sender or owner == address(this) without allowance.
         // Snapshot the Concrete-share delta to update our internal
         // tracker so subsequent totalAssets() readings stay correct.
         uint256 cBefore = concreteVault.balanceOf(address(this));
-        concreteVault.withdraw(amount, msg.sender, address(this));
+        concreteVault.withdraw(fyusdAmount, msg.sender, address(this));
         uint256 cAfter = concreteVault.balanceOf(address(this));
         uint256 burned = cBefore - cAfter;
-        // Defensive clamp: if Concrete burned fewer shares than tracked
-        // (shouldn't happen under standard ERC-4626 semantics) we
-        // saturate at 0 rather than underflow.
         accountedConcreteShares = burned > accountedConcreteShares
             ? 0
             : accountedConcreteShares - burned;
 
-        emit Withdrawn(msg.sender, shares, amount);
-        return amount;
+        emit Withdrawn(msg.sender, burnShares, fyusdAmount);
+        return fyusdAmount;
     }
 
     /**

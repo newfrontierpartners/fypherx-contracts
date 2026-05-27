@@ -222,7 +222,7 @@ describe("ConcreteAdapterV1", () => {
       assert.equal(await adapter.totalShares(), 0n);
     });
 
-    it("delivers yield-inclusive amount when withdrawing all shares post-yield", async () => {
+    it("delivers yield-inclusive amount when withdrawing the full position post-yield", async () => {
       const { deployer, vault, fyusd, adapter, concreteVault } = await deployFixture();
       const principal = 1000n * ONE;
       const yield_ = 100n * ONE;
@@ -234,18 +234,16 @@ describe("ConcreteAdapterV1", () => {
       await fyusd.connect(deployer).approve(await concreteVault.getAddress(), yield_);
       await concreteVault.connect(deployer).simulateYield(yield_);
 
+      // FYP-41 patch: withdraw is now ASSET-based, so to drain the
+      // full position we ask for the live totalAssets value rather
+      // than the original share count.
+      const ta = await adapter.totalAssets();
       const balBefore = await fyusd.balanceOf(vault.address);
-      await adapter.connect(vault).withdraw(principal);  // burn all shares
+      await adapter.connect(vault).withdraw(ta);
       const balAfter = await fyusd.balanceOf(vault.address);
 
-      // OZ ERC-4626 rounds convertToAssets down by 1 wei (inflation-
-      // attack protection). The adapter sees totalAssets = principal +
-      // yield - 1 just before the withdraw, so the delivered amount is
-      // principal + yield - 1 as well. 1-wei NAV under-report is
-      // acceptable per upstream OZ design.
-      const expected = principal + yield_ - 1n;
-      assert.equal(balAfter - balBefore, expected,
-        "withdraw delivers principal + yield (less the OZ inflation-bias 1 wei)");
+      assert.equal(balAfter - balBefore, ta,
+        "withdraw delivers exactly the requested asset amount");
       assert.equal(await adapter.totalShares(), 0n);
     });
 
@@ -266,16 +264,18 @@ describe("ConcreteAdapterV1", () => {
       assert.equal(await adapter.totalShares(), half);
     });
 
-    it("rejects withdraw beyond shareOf", async () => {
+    it("rejects withdraw beyond totalAssets", async () => {
       const { vault, fyusd, adapter } = await deployFixture();
       const amount = 1000n * ONE;
 
       await fundAndApprove(fyusd, adapter, vault, amount);
       await adapter.connect(vault).deposit(amount);
 
+      // FYP-41 patch: withdraw is asset-based now, so the relevant
+      // bound is totalAssets, not the caller's adapter-share count.
       await assert.rejects(
         adapter.connect(vault).withdraw(amount + 1n),
-        /InsufficientShares/,
+        /InsufficientAssets/,
       );
     });
 

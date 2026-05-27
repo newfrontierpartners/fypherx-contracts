@@ -174,15 +174,22 @@ describe("FypherStakingHub", () => {
   });
 
   describe("unstake", () => {
-    it("returns underlying + settles outstanding rewards", async () => {
+    it("returns underlying and accrues outstanding rewards into the pull-claim pot", async () => {
       const { alice, hub, rusd, fpy } = await deployFixture();
       await (await hub.connect(alice).stake(0, 200n * ONE)).wait();
       await mineBlocks(5);
       const rusdBefore = await rusd.balanceOf(alice.address);
       const fpyBefore = await fpy.balanceOf(alice.address);
       await (await hub.connect(alice).unstake(0, 200n * ONE)).wait();
+      // FYP-58 patch: unstake no longer transfers rewards inline. The
+      // principal returns immediately; the accrued FYP lands in
+      // {pendingFpyRewards} for the user to claim later via
+      // {claim} / {claimRewards}.
       assert.equal(await rusd.balanceOf(alice.address) - rusdBefore, 200n * ONE);
-      assert.ok((await fpy.balanceOf(alice.address)) > fpyBefore);
+      assert.equal(await fpy.balanceOf(alice.address), fpyBefore,
+        "no inline FPY transfer on unstake");
+      assert.ok((await hub.pendingFpyRewards(alice.address)) > 0n,
+        "accrued FPY booked into the pull-claim pot");
       const [amt, ] = await hub.userStake(0, alice.address);
       assert.equal(amt, 0n);
     });
@@ -285,7 +292,7 @@ describe("FypherStakingHub", () => {
   });
 
   describe("FPY funding", () => {
-    it("claim reverts InsufficientFpy when treasury runs dry", async () => {
+    it("claim returns 0 when treasury is dry but leaves the booked balance intact", async () => {
       const [deployer, alice, , , , , extra] = await ethers.getSigners();
       const SettingManagement = await ethers.getContractFactory("SettingManagement");
       const setting = await upgrades.deployProxy(SettingManagement, [deployer.address], {
@@ -307,10 +314,29 @@ describe("FypherStakingHub", () => {
       await (await hub.connect(alice).stake(0, 100n * ONE)).wait();
       await mineBlocks(5);
 
-      await assert.rejects(
-        hub.connect(alice).claim(0),
-        (err) => err.message.includes("InsufficientFpy"),
-      );
+      // FYP-58 patch: claim no longer reverts on an under-funded hub;
+      // it accrues the per-pool emission into {pendingFpyRewards} and
+      // pays out whatever the hub balance allows (here: 0).
+      const fpyBefore = await fpy.balanceOf(alice.address);
+      await (await hub.connect(alice).claim(0)).wait();
+      assert.equal(await fpy.balanceOf(alice.address), fpyBefore,
+        "nothing transferred when hub is dry");
+      assert.ok((await hub.pendingFpyRewards(alice.address)) > 0n,
+        "accrued FPY remains booked in the pull-claim pot");
+
+      // Ops re-funds the hub later; claim then drains the live pot.
+      await (await fpy.mint(extra.address, 1_000n * ONE)).wait();
+      await (await fpy.connect(extra).approve(await hub.getAddress(), ethers.MaxUint256)).wait();
+      await (await hub.connect(extra).fundFpy(1_000n * ONE)).wait();
+      // Halt emissions so the {claimableRewards} view we snapshot now
+      // matches what {claimRewards} will pay one block later. Without
+      // this, the additional accrual between view-read and write tx
+      // makes the actual payout strictly larger than the snapshot.
+      await (await hub.setFpyPerBlock(0)).wait();
+      const expectedPaid = await hub.claimableRewards(alice.address);
+      await (await hub.connect(alice).claimRewards()).wait();
+      assert.equal(await fpy.balanceOf(alice.address) - fpyBefore, expectedPaid);
+      assert.equal(await hub.pendingFpyRewards(alice.address), 0n);
     });
   });
 });

@@ -87,6 +87,24 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
     Pool[] private _pools;
     mapping(uint256 => mapping(address => UserStake)) private _stakes;
 
+    // ── Storage append (FYP-58 patch — APPEND-ONLY for proxy safety) ──
+    /**
+     * @notice Accrued-but-unpaid FYP rewards per user, across every
+     *         pool. {stake} / {unstake} / {migrate} accrue into this
+     *         pot without attempting a transfer; the live transfer
+     *         happens only in {claim} / {claimRewards}, which
+     *         tolerate an under-funded hub.
+     *
+     * @dev FYP-58 patch. The previous shape settled rewards inline
+     *      via {_payFpy} on every principal-changing call, so a
+     *      hub balance dip below the user's pending amount reverted
+     *      {unstake} — trapping principal until ops re-funded.
+     *      Decoupling the settlement from the transfer makes
+     *      principal moves balance-independent; rewards just wait
+     *      in {pendingFpyRewards} until the hub is funded.
+     */
+    mapping(address => uint256) public pendingFpyRewards;
+
     // ── Events ──
 
     event PoolAdded(uint256 indexed poolId, address indexed underlying, uint64 weightBps);
@@ -99,6 +117,10 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
     event RewardsClaimed(uint256 indexed poolId, address indexed user, uint256 amount);
     event Migrated(uint256 indexed poolId, address indexed user, uint256 amount);
     event FpyFunded(address indexed from, uint256 amount);
+    /// @notice FYP-58 patch. Emitted whenever {_settlePending} moves
+    ///         pending FYP from a pool's accumulator into the
+    ///         user-level {pendingFpyRewards} pot (without paying).
+    event RewardsAccrued(uint256 indexed poolId, address indexed user, uint256 amount);
 
     // ── Errors ──
 
@@ -279,6 +301,11 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
      *         The accrual snapshot is taken before crediting so that
      *         migrated users do not retroactively earn rewards for blocks
      *         that elapsed before they joined.
+     *
+     * @dev FYP-58 patch. Any pending FYP from a prior position is now
+     *      accrued into {pendingFpyRewards} instead of paid inline,
+     *      so an under-funded hub does not revert the whole migration
+     *      batch. Users claim later through {claim} or {claimRewards}.
      */
     function migrate(
         uint256 poolId,
@@ -305,11 +332,13 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
             if (amt == 0) continue;
 
             UserStake storage s = _stakes[poolId][u];
-            // Settle any prior position before adding (idempotent migration).
+            // Settle any prior position before adding (idempotent
+            // migration). FYP-58: accrue into the pull-claim pot
+            // instead of paying inline.
             uint256 pending = _pendingNoUpdate(p, s);
             if (pending > 0) {
-                _payFpy(u, pending);
-                emit RewardsClaimed(poolId, u, pending);
+                pendingFpyRewards[u] += pending;
+                emit RewardsAccrued(poolId, u, pending);
             }
             s.amount += amt;
             s.fpyDebt = (s.amount * p.accFpyPerShare) / ACC_PRECISION;
@@ -320,6 +349,13 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
 
     // ── User actions ──
 
+    /**
+     * @dev FYP-58 patch. Any pending FYP rewards from prior accrual
+     *      are routed into the user-level {pendingFpyRewards} pot
+     *      via {_settlePending}, NOT into an inline {_payFpy} call.
+     *      stake() therefore proceeds regardless of the hub's
+     *      current FYP balance.
+     */
     function stake(uint256 poolId, uint256 amount)
         external
         nonReentrant
@@ -329,16 +365,9 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         Pool storage p = _pools[poolId];
         if (p.paused) revert PoolPausedErr(poolId);
 
-        _updatePool(poolId);
+        _settlePending(poolId, msg.sender);
+
         UserStake storage s = _stakes[poolId][msg.sender];
-
-        // Settle any pending rewards before changing the principal.
-        uint256 pending = _pendingNoUpdate(p, s);
-        if (pending > 0) {
-            _payFpy(msg.sender, pending);
-            emit RewardsClaimed(poolId, msg.sender, pending);
-        }
-
         p.underlying.safeTransferFrom(msg.sender, address(this), amount);
         s.amount += amount;
         p.totalStaked += amount;
@@ -347,6 +376,13 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         emit Staked(poolId, msg.sender, amount);
     }
 
+    /**
+     * @dev FYP-58 patch. unstake() now always returns principal even
+     *      when the hub is under-funded for the user's accrued
+     *      rewards — the pending reward stays in {pendingFpyRewards}
+     *      until the next funding event. Pre-patch behaviour reverted
+     *      with {InsufficientFpy}, trapping principal.
+     */
     function unstake(uint256 poolId, uint256 amount)
         external
         nonReentrant
@@ -356,15 +392,10 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         Pool storage p = _pools[poolId];
         // NOTE: pause does not block unstake — we don't trap user funds.
 
-        _updatePool(poolId);
+        _settlePending(poolId, msg.sender);
+
         UserStake storage s = _stakes[poolId][msg.sender];
         if (s.amount < amount) revert InsufficientStake(s.amount, amount);
-
-        uint256 pending = _pendingNoUpdate(p, s);
-        if (pending > 0) {
-            _payFpy(msg.sender, pending);
-            emit RewardsClaimed(poolId, msg.sender, pending);
-        }
 
         s.amount -= amount;
         p.totalStaked -= amount;
@@ -374,20 +405,42 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         emit Unstaked(poolId, msg.sender, amount);
     }
 
+    /**
+     * @notice Settle any unpaid emissions from `poolId` for the caller
+     *         and then attempt to drain {pendingFpyRewards[caller]}
+     *         out to the caller. Tolerates an under-funded hub by
+     *         paying out what's available and leaving the rest
+     *         booked for a later claim (FYP-58).
+     */
     function claim(uint256 poolId)
         external
         nonReentrant
         validPool(poolId)
         returns (uint256 paid)
     {
-        Pool storage p = _pools[poolId];
-        _updatePool(poolId);
-        UserStake storage s = _stakes[poolId][msg.sender];
-        paid = _pendingNoUpdate(p, s);
-        if (paid == 0) return 0;
-        s.fpyDebt = (s.amount * p.accFpyPerShare) / ACC_PRECISION;
-        _payFpy(msg.sender, paid);
-        emit RewardsClaimed(poolId, msg.sender, paid);
+        _settlePending(poolId, msg.sender);
+        paid = _payOutPending(msg.sender);
+        if (paid > 0) emit RewardsClaimed(poolId, msg.sender, paid);
+    }
+
+    /**
+     * @notice Settle every pool the caller has a position in and pay
+     *         out the accumulated {pendingFpyRewards} balance.
+     *         Convenience entry-point so users with positions across
+     *         multiple pools do not have to call {claim} per-pool.
+     *
+     * @dev FYP-58 patch. New addition; pairs with {claim} as a
+     *      single-call drain across all pools.
+     */
+    function claimRewards() external nonReentrant returns (uint256 paid) {
+        uint256 nPools = _pools.length;
+        for (uint256 i = 0; i < nPools; ++i) {
+            _settlePending(i, msg.sender);
+        }
+        paid = _payOutPending(msg.sender);
+        // Use poolId == type(uint256).max as the "cross-pool" sentinel
+        // so the indexer can distinguish from per-pool claims.
+        if (paid > 0) emit RewardsClaimed(type(uint256).max, msg.sender, paid);
     }
 
     /**
@@ -441,7 +494,10 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         return (s.amount, s.fpyDebt);
     }
 
-    /// @notice Current pending FPY for a user (no state change).
+    /// @notice Current pending FPY for a user in a specific pool (no
+    ///         state change). Excludes the user-level
+    ///         {pendingFpyRewards} pot — use {claimableRewards} for
+    ///         a total-across-everything figure.
     function pendingFpy(uint256 poolId, address user)
         external
         view
@@ -459,6 +515,34 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
             acc += (reward * ACC_PRECISION) / p.totalStaked;
         }
         return (s.amount * acc) / ACC_PRECISION - s.fpyDebt;
+    }
+
+    /**
+     * @notice Total FYP the user could claim right now: the
+     *         {pendingFpyRewards} pot (already-settled rewards
+     *         waiting for transfer) plus the per-pool projections
+     *         from {pendingFpy} (rewards that would settle the next
+     *         time the user touches each pool).
+     *
+     * @dev FYP-58 patch. New view for the pull-claim model — the
+     *      backend / frontend should display this as the "claimable
+     *      rewards" figure.
+     */
+    function claimableRewards(address user) external view returns (uint256 total) {
+        total = pendingFpyRewards[user];
+        uint256 nPools = _pools.length;
+        for (uint256 i = 0; i < nPools; ++i) {
+            Pool storage p = _pools[i];
+            UserStake storage s = _stakes[i][user];
+            if (s.amount == 0) continue;
+            uint256 acc = p.accFpyPerShare;
+            if (block.number > p.lastAccrualBlock && p.totalStaked > 0 && totalAllocBps > 0) {
+                uint256 elapsed = block.number - p.lastAccrualBlock;
+                uint256 reward = (elapsed * fpyPerBlock * p.weightBps) / totalAllocBps;
+                acc += (reward * ACC_PRECISION) / p.totalStaked;
+            }
+            total += (s.amount * acc) / ACC_PRECISION - s.fpyDebt;
+        }
     }
 
     // ── Internal ──
@@ -482,9 +566,40 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         return (s.amount * p.accFpyPerShare) / ACC_PRECISION - s.fpyDebt;
     }
 
-    function _payFpy(address to, uint256 amount) internal {
+    /**
+     * @dev FYP-58 patch. Move any pool-level pending FYP for `user`
+     *      into the user-level {pendingFpyRewards} pot. Does NOT
+     *      transfer — the live transfer happens in {_payOutPending}
+     *      which the public {claim} / {claimRewards} entry-points
+     *      call. Stamping the fpyDebt here is mandatory so the next
+     *      {_pendingNoUpdate} for this user/pool starts from zero.
+     */
+    function _settlePending(uint256 poolId, address user) internal {
+        _updatePool(poolId);
+        Pool storage p = _pools[poolId];
+        UserStake storage s = _stakes[poolId][user];
+        uint256 pending = _pendingNoUpdate(p, s);
+        s.fpyDebt = (s.amount * p.accFpyPerShare) / ACC_PRECISION;
+        if (pending > 0) {
+            pendingFpyRewards[user] += pending;
+            emit RewardsAccrued(poolId, user, pending);
+        }
+    }
+
+    /**
+     * @dev FYP-58 patch. Pull-claim helper. Pays out as much of
+     *      {pendingFpyRewards[user]} as the hub can afford, leaves
+     *      the rest booked. Never reverts on under-funding — the
+     *      whole point of the pull-claim refactor is that principal
+     *      moves do not depend on the hub being fully funded.
+     */
+    function _payOutPending(address user) internal returns (uint256 paid) {
+        uint256 pending = pendingFpyRewards[user];
+        if (pending == 0) return 0;
         uint256 bal = fpy.balanceOf(address(this));
-        if (bal < amount) revert InsufficientFpy(bal, amount);
-        fpy.safeTransfer(to, amount);
+        if (bal == 0) return 0;
+        paid = bal >= pending ? pending : bal;
+        pendingFpyRewards[user] = pending - paid;
+        fpy.safeTransfer(user, paid);
     }
 }

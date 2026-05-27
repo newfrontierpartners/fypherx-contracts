@@ -224,9 +224,12 @@ contract RUSDYieldVault is
         _exitToCooldown(msg.sender, assets, shares);
     }
 
+    /// @dev FYP-41 patch. See {FyusdYieldVault._exitToCooldown} for
+    ///      the cross-vault rationale on switching to asset-based
+    ///      adapter withdraw.
     function _exitToCooldown(address user, uint256 assets, uint256 shares) internal {
         _burn(user, shares);
-        uint256 received = adapter.withdraw(shares);
+        uint256 received = adapter.withdraw(assets);
         if (received < assets) revert AdapterReturnedShort(assets, received);
 
         IERC20(asset()).safeTransfer(address(silo), received);
