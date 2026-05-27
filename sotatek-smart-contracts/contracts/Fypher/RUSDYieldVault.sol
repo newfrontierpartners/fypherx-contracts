@@ -287,6 +287,8 @@ contract RUSDYieldVault is
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;
     }

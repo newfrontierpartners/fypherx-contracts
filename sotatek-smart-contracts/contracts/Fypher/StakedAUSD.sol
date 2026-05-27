@@ -7,6 +7,7 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUp
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "../libraries/PoolMath.sol";
@@ -24,6 +25,12 @@ import "../libraries/PoolMath.sol";
  *      Single silo: stAUSDSilo (0xc65F...) for FYUSD cooldown.
  *      The institutional fork (iRUSDSilo / SIRUSDSilo) was retired
  *      from the alpha audit scope — see backup/irusd/.
+ *
+ * @dev <b>FYP-21 — reward terminology</b>. Rewards funded via
+ *      {transferInRewards} STREAM to current stAUSD holders during
+ *      the 8-hour release window (Ethena sUSDe pattern). The
+ *      "vesting" identifiers are retained for ABI / proxy layout
+ *      stability. See {StakedRUSD} for the full decision rationale.
  */
 contract StakedAUSD is
     Initializable,
@@ -203,6 +210,10 @@ contract StakedAUSD is
     function maxWithdraw(address) public pure override returns (uint256) { return 0; }
     function maxRedeem(address) public pure override returns (uint256) { return 0; }
 
+    /// @notice See {StakedRUSD.previewWithdraw}. FYP-06 lingering.
+    function previewWithdraw(uint256) public pure override returns (uint256) { return 0; }
+    function previewRedeem(uint256) public pure override returns (uint256) { return 0; }
+
     /**
      * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
      * @dev April-audit M-4 patch. See StakedRUSD._debitUserStaked.
@@ -219,7 +230,8 @@ contract StakedAUSD is
      */
     function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
-        uint256 shares = previewWithdraw(assets);
+        // FYP-06 lingering. See {StakedRUSD.cooldownAssets}.
+        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
         _withdraw(msg.sender, silo, msg.sender, assets, shares);
         _debitUserStaked(msg.sender, assets);
         _accrueCooldown(msg.sender, assets);
@@ -227,7 +239,7 @@ contract StakedAUSD is
 
     function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
-        uint256 assets = previewRedeem(shares);
+        uint256 assets = _convertToAssets(shares, Math.Rounding.Floor);
         _withdraw(msg.sender, silo, msg.sender, assets, shares);
         _debitUserStaked(msg.sender, assets);
         _accrueCooldown(msg.sender, assets);
@@ -315,10 +327,13 @@ contract StakedAUSD is
     }
 
     function setCurrentAPY(uint256 newAPR) external onlyAdmin {
+        // FYP-39: skip the SSTORE when the value is unchanged.
+        if (newAPR == currentAPRRate) return;
         currentAPRRate = newAPR;
     }
 
     function setRemainingRewards(uint256 amount) external onlyAdmin {
+        if (amount == remainingRewards) return;
         remainingRewards = amount;
     }
 
@@ -357,7 +372,8 @@ contract StakedAUSD is
     function unpause() external onlyAdmin { _unpause(); }
 
     /**
-     * @dev FYP-03 patch. See {StakedRUSD._update} for the rationale.
+     * @dev FYP-03 patch + FYP-03 lingering patch.
+     *      See {StakedRUSD._update} for the full rationale.
      */
     function _update(address from, address to, uint256 value)
         internal override(ERC20Upgradeable, ERC20PausableUpgradeable)
@@ -368,9 +384,13 @@ contract StakedAUSD is
             if (settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), to))
                 revert RestrictedStaker(to);
 
-            uint256 assetsMoved = previewRedeem(value);
-            _debitUserStaked(from, assetsMoved);
-            userStakedAmount[to] += assetsMoved;
+            uint256 fromBalance = balanceOf(from);
+            uint256 principalMoved;
+            if (fromBalance > 0) {
+                principalMoved = (userStakedAmount[from] * value) / fromBalance;
+            }
+            _debitUserStaked(from, principalMoved);
+            userStakedAmount[to] += principalMoved;
         }
         super._update(from, to, value);
     }

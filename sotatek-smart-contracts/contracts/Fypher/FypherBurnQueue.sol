@@ -334,17 +334,21 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
 
     function setSupportedAsset(address asset, bool supported) external onlyAdmin {
         if (asset == address(0)) revert ZeroAddress();
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (supportedAssets[asset] == supported) return;
         supportedAssets[asset] = supported;
         emit CollateralAssetSet(asset, supported);
     }
 
     function setBurnPaused(address asset, bool paused) external onlyAdmin {
+        if (burnPaused[asset] == paused) return;
         burnPaused[asset] = paused;
         emit BurnPausedSet(asset, paused);
     }
 
     function setBackendSigner(address newSigner) external onlyAdmin {
         if (newSigner == address(0)) revert ZeroAddress();
+        if (newSigner == backendSigner) return;
         emit BackendSignerUpdated(backendSigner, newSigner);
         backendSigner = newSigner;
     }

@@ -7,6 +7,7 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUp
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "../libraries/PoolMath.sol";
@@ -15,11 +16,38 @@ import "./RUSDSilo.sol";
 /**
  * @title StakedRUSD (sRUSD)
  * @notice Primary retail staking vault for RUSD using ERC-4626.
- *         APR-based reward distribution with linear 8-hour vesting.
- *         Cooldown mechanism: assets held in RUSDSilo during cooldown period.
+ *         APR-based reward distribution with an 8-hour linear release
+ *         window (see FYP-21 note below). Cooldown mechanism: assets
+ *         held in RUSDSilo during the cooldown period.
  *
  * @dev Upgradeable (TransparentProxy). Deployed at: 0x2c048e01ebf957f7Ab66C3a09E85Ae31db7803D6
  *      Implementation: 0xd9c9f728dc7d5e81e2df406b82fe2540f2d484f3
+ *
+ * @dev <b>FYP-21 — reward terminology decision</b>. CertiK flagged
+ *      that the "vesting" terminology used by {vestingAmount},
+ *      {_unvestedAmount}, and {VESTING_PERIOD} misrepresents how
+ *      rewards are distributed. The intended model is the Ethena
+ *      sUSDe pattern — rewards STREAM to whichever addresses hold
+ *      sRUSD shares during the 8-hour release window, including
+ *      depositors who joined after {transferInRewards} was called.
+ *      They are NOT "vested" to a fixed cohort of pre-existing
+ *      stakers.
+ *
+ *      The identifiers are intentionally retained (rather than
+ *      renamed to {unreleasedRewards} / {_unreleasedAmount} /
+ *      {REWARD_RELEASE_PERIOD}) for two reasons:
+ *      (a) TransparentProxy storage layout safety — the contract
+ *          is live on a testnet proxy and a slot-name change risks
+ *          accidental layout reordering on the next compile;
+ *      (b) backend Web3j bindings + indexers key off the current
+ *          names. Renaming would require a coordinated cutover with
+ *          fypherx-gateway / fypherx-risk-service.
+ *
+ *      The semantic clarification lives in this docstring and in
+ *      the per-function NatSpec on {totalAssets} and
+ *      {transferInRewards} below. Integrators must read those notes
+ *      to understand the streaming semantics — the names alone are
+ *      legacy.
  */
 contract StakedRUSD is
     Initializable,
@@ -295,6 +323,28 @@ contract StakedRUSD is
         return 0;
     }
 
+    /// @notice ERC-4626 advertisement that no synchronous withdraw is
+    ///         available. Mirrors {maxWithdraw} so integrators that
+    ///         consult the preview surface do not receive a misleading
+    ///         non-zero conversion. The cooldown flow uses the internal
+    ///         {_convertToShares} directly so this override does not
+    ///         affect it.
+    /// @dev FYP-06 lingering. CertiK noted the original FYP-06 patch
+    ///      left {previewWithdraw}/{previewRedeem} returning real
+    ///      conversion numbers (because {cooldownAssets}/{cooldownShares}
+    ///      and the legacy {_update} transfer hook re-used them). The
+    ///      internal callers have been migrated to {_convertToShares}/
+    ///      {_convertToAssets}, so the public preview surface can now
+    ///      return 0 in lockstep with {maxWithdraw}/{maxRedeem}.
+    function previewWithdraw(uint256) public pure override returns (uint256) {
+        return 0;
+    }
+
+    /// @notice See {previewWithdraw}.
+    function previewRedeem(uint256) public pure override returns (uint256) {
+        return 0;
+    }
+
     /**
      * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
      *
@@ -334,7 +384,12 @@ contract StakedRUSD is
      */
     function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
-        uint256 shares = previewWithdraw(assets);
+        // FYP-06 lingering. Bypass {previewWithdraw} (now returns 0)
+        // and use the OZ internal conversion directly. Math.Rounding.Ceil
+        // matches the original {previewWithdraw} semantics: round shares
+        // burned UP so the vault never short-withdraws against the asset
+        // amount it just owes the user.
+        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
         _withdraw(msg.sender, address(silo), msg.sender, assets, shares);
         _debitUserStaked(msg.sender, assets);
 
@@ -343,7 +398,10 @@ contract StakedRUSD is
 
     function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
-        uint256 assets = previewRedeem(shares);
+        // FYP-06 lingering. See {cooldownAssets}. Math.Rounding.Floor
+        // matches the original {previewRedeem} semantics: round assets
+        // returned DOWN so the vault never over-pays out per share.
+        uint256 assets = _convertToAssets(shares, Math.Rounding.Floor);
         _withdraw(msg.sender, address(silo), msg.sender, assets, shares);
         _debitUserStaked(msg.sender, assets);
 
@@ -434,11 +492,14 @@ contract StakedRUSD is
     }
 
     function setCurrentAPY(uint256 newAPR) external onlyAdmin {
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newAPR == currentAPRRate) return;
         currentAPRRate = newAPR;
         emit APRUpdated(newAPR);
     }
 
     function setRemainingRewards(uint256 amount) external onlyAdmin {
+        if (amount == remainingRewards) return;
         remainingRewards = amount;
     }
 
@@ -530,24 +591,45 @@ contract StakedRUSD is
 
     // ── Internal overrides ──
     /**
-     * @dev FYP-03 patch. The previous body was a plain pass-through to
-     *      the parent ERC20/Pausable _update, meaning an unrestricted
-     *      holder could route freshly-deposited sRUSD shares to a
-     *      restricted address by plain ERC-20 transfer. Worse, the
-     *      `userStakedAmount` mapping stayed attached to the original
-     *      depositor — off-chain dashboards that read it as "principal
-     *      stake" reported the stake on the wrong account.
+     * @dev FYP-03 patch + FYP-03 lingering patch (May 2026).
      *
-     *      We now (a) enforce the same `notRestricted(to)` gate that
-     *      {deposit} / {mint} apply, and (b) shift the proportional
-     *      asset value out of the sender's stake counter and into the
-     *      recipient's. Mint and burn paths bypass both branches —
-     *      mint accounting is done in {deposit}/{mint}, burn
-     *      accounting is done in {cooldownAssets}/{cooldownShares}
-     *      (and in legacy {_debitUserStaked} call sites). The
-     *      asset value is read at current NAV; users transferring
-     *      yield-bearing shares to another account move the
-     *      "principal" attribution along with the shares.
+     *      <p>Original FYP-03 problem: the previous body was a plain
+     *      pass-through to the parent ERC20/Pausable _update. An
+     *      unrestricted holder could route freshly-deposited sRUSD
+     *      shares to a restricted address by plain ERC-20 transfer,
+     *      and `userStakedAmount` stayed attached to the original
+     *      depositor — off-chain dashboards reported the stake on the
+     *      wrong account. The first patch added the `notRestricted(to)`
+     *      gate and moved a NAV-equivalent `previewRedeem(value)`
+     *      worth of principal from sender to recipient.
+     *
+     *      <p>Why this second revision (FYP-03 lingering, CertiK May
+     *      2026): NAV-equivalent move included accrued rewards as
+     *      "principal" on the recipient side, most visibly when a
+     *      user transferred to themselves and watched their
+     *      `userStakedAmount` jump from `deposit principal` to
+     *      `deposit principal + accrued rewards`. The new shape uses
+     *      share-fraction math:
+     *
+     *        principalMoved = userStakedAmount[from] × value
+     *                         / balanceOf(from)
+     *
+     *      computed against the PRE-transfer balance (super._update
+     *      runs after our hook). Properties:
+     *
+     *      - Self-transfer of `balanceOf(from)` leaves
+     *        userStakedAmount[from] unchanged (proportionate split
+     *        of all principal returns to the same account).
+     *      - Partial transfer splits principal proportionally with
+     *        the shares moved.
+     *      - principalMoved is bounded by userStakedAmount[from]
+     *        because value ≤ balanceOf(from); no over-debit.
+     *      - Reward accrual is reflected purely via share-price
+     *        growth (totalAssets), never via the principal counter.
+     *
+     *      Mint and burn bypass both branches — mint accounting is
+     *      done in {deposit}/{mint}, burn accounting is done in
+     *      {cooldownAssets}/{cooldownShares} / {_debitUserStaked}.
      */
     function _update(
         address from,
@@ -560,9 +642,13 @@ contract StakedRUSD is
             if (settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), to))
                 revert RestrictedStaker(to);
 
-            uint256 assetsMoved = previewRedeem(value);
-            _debitUserStaked(from, assetsMoved);
-            userStakedAmount[to] += assetsMoved;
+            uint256 fromBalance = balanceOf(from);
+            uint256 principalMoved;
+            if (fromBalance > 0) {
+                principalMoved = (userStakedAmount[from] * value) / fromBalance;
+            }
+            _debitUserStaked(from, principalMoved);
+            userStakedAmount[to] += principalMoved;
         }
         super._update(from, to, value);
     }

@@ -320,6 +320,27 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     }
 
     // ── Core: Mint ──
+    /**
+     * @notice Execute a backend-signed mint order. Pulls
+     *         {order.collateral_amount} of {order.collateral_asset}
+     *         from {order.benefactor} (routed across whitelisted
+     *         custodians per {route}) and mints {order.rusd_amount}
+     *         RUSD to {order.beneficiary}.
+     *
+     * @dev <b>FYP-49 — permissionless submission</b>. Any address that
+     *      holds a valid backend-signed {Order} + matching {route} can
+     *      call this function. The benefactor's collateral approval is
+     *      still required (the contract calls
+     *      {safeTransferFrom(benefactor, custodian, amount)} inside
+     *      {_distributeCollateral}), so a third-party caller cannot
+     *      drain a benefactor who never opted in. This shape is
+     *      intentional: it lets a relayer (paymaster / sponsored-tx
+     *      service) submit on behalf of the benefactor for gas-
+     *      sponsorship flows. Off-chain integrators that need
+     *      "only-benefactor-can-call" semantics should bind the
+     *      benefactor key directly rather than relying on contract-
+     *      level gating.
+     */
     function mint(
         Order calldata order,
         Route calldata route,
@@ -499,7 +520,11 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         if (n == 0 || n != route.ratios.length) revert InvalidRoute();
         IERC20 collateral = IERC20(order.collateral_asset);
         uint256 totalRatio;
-        for (uint256 i = 0; i < n; ) {
+        // FYP-61: dropped the `unchecked { ++i; }` block — solc 0.8.22
+        // already elides the loop-counter overflow check for the
+        // standard `for (...; ++i)` shape, so the unchecked block
+        // saved no gas while making the loop harder to read.
+        for (uint256 i = 0; i < n; ++i) {
             address dest = route.addresses[i];
             uint256 ratio = route.ratios[i];
             if (dest == address(0)) revert InvalidRoute();
@@ -510,7 +535,6 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
             if (amount > 0) {
                 collateral.safeTransferFrom(order.benefactor, dest, amount);
             }
-            unchecked { ++i; }
         }
         if (totalRatio != BPS_DENOMINATOR) revert InvalidRoute();
     }
@@ -721,55 +745,68 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     }
 
     // ── Admin ──
+    // FYP-39: all setters below skip the SSTORE + event when the new
+    // value matches the live value, so dashboard "re-apply config"
+    // transactions become free no-ops.
     function addSupportedAsset(address asset) external onlyAdmin {
         if (asset == address(0)) revert ZeroAddress();
+        if (supportedAssets[asset]) return;
         supportedAssets[asset] = true;
         emit AssetAdded(asset);
     }
 
     function removeSupportedAsset(address asset) external onlyAdmin {
+        if (!supportedAssets[asset]) return;
         supportedAssets[asset] = false;
         emit AssetRemoved(asset);
     }
 
     function addCustodianAddress(address custodian) external onlyAdmin {
         if (custodian == address(0)) revert ZeroAddress();
+        if (custodianAddresses[custodian]) return;
         custodianAddresses[custodian] = true;
         emit CustodianAdded(custodian);
     }
 
     function removeCustodianAddress(address custodian) external onlyAdmin {
+        if (!custodianAddresses[custodian]) return;
         custodianAddresses[custodian] = false;
         emit CustodianRemoved(custodian);
     }
 
     function setBackendSigner(address signer) external onlyAdmin {
         if (signer == address(0)) revert ZeroAddress();
+        if (signer == backendSigner) return;
         backendSigner = signer;
         emit SignerUpdated(signer);
     }
 
     function setBackendExecutor(address executor) external onlyAdmin {
         if (executor == address(0)) revert ZeroAddress();
+        if (executor == backendExecutor) return;
         backendExecutor = executor;
         emit ExecutorUpdated(executor);
     }
 
     function setGlobalMaxMintPerBlock(uint256 limit) external onlyAdmin {
+        if (limit == globalMaxMintPerBlock) return;
         globalMaxMintPerBlock = limit;
         emit MaxMintPerBlockUpdated(limit);
     }
 
     function setGlobalMaxRedeemPerBlock(uint256 limit) external onlyAdmin {
+        if (limit == globalMaxRedeemPerBlock) return;
         globalMaxRedeemPerBlock = limit;
         emit MaxRedeemPerBlockUpdated(limit);
     }
 
     function setMaxMintPerBlock(address asset, uint256 limit) external onlyAdmin {
+        if (maxMintPerBlock[asset] == limit) return;
         maxMintPerBlock[asset] = limit;
     }
 
     function setMaxRedeemPerBlock(address asset, uint256 limit) external onlyAdmin {
+        if (maxRedeemPerBlock[asset] == limit) return;
         maxRedeemPerBlock[asset] = limit;
     }
 
@@ -785,10 +822,12 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
      *      on-chain effect.
      */
     function setStablesDeltaLimit(uint256 limit) external onlyAdmin {
+        if (limit == stablesDeltaLimit) return;
         stablesDeltaLimit = limit;
     }
 
     function disableMintRedeem(bool disabled) external onlyAdmin {
+        if (disabled == mintRedeemDisabled) return;
         mintRedeemDisabled = disabled;
         emit MintRedeemToggled(disabled);
     }
@@ -807,6 +846,7 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
             // Unpause requires admin (multisig) only.
             if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
         }
+        if (mintPaused[asset] == paused) return;
         mintPaused[asset] = paused;
         emit MintPausedSet(asset, paused);
     }
@@ -820,11 +860,13 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         if (!paused) {
             if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
         }
+        if (burnPaused[asset] == paused) return;
         burnPaused[asset] = paused;
         emit BurnPausedSet(asset, paused);
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;
     }

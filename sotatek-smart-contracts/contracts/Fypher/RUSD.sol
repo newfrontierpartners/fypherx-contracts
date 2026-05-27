@@ -52,6 +52,8 @@ contract RUSD is
 
     function setMinter(address newMinter) external onlyOwner {
         if (newMinter == address(0)) revert ZeroAddress();
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newMinter == _minter) return;
         emit MinterUpdated(_minter, newMinter);
         _minter = newMinter;
     }

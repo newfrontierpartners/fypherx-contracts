@@ -49,6 +49,8 @@ contract SettingManagement is SingleAdminAccessControl {
     }
 
     function setFees(string calldata feeType, uint256 fee) external onlyAdmin {
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (_fees[feeType] == fee) return;
         _fees[feeType] = fee;
         emit FeeUpdated(feeType, fee);
     }
@@ -58,6 +60,7 @@ contract SettingManagement is SingleAdminAccessControl {
     }
 
     function setFeeReceiver(address receiver) external onlyAdmin {
+        if (_feeReceiver == receiver) return;
         _feeReceiver = receiver;
         emit FeeReceiverUpdated(receiver);
     }
@@ -68,6 +71,7 @@ contract SettingManagement is SingleAdminAccessControl {
     }
 
     function setPoolConfigs(string calldata key, uint256 value) external onlyAdmin {
+        if (_poolConfigs[key] == value) return;
         _poolConfigs[key] = value;
         emit PoolConfigUpdated(key, value);
     }
@@ -78,6 +82,7 @@ contract SettingManagement is SingleAdminAccessControl {
     }
 
     function setReservePool(address pool) external onlyAdmin {
+        if (_reservePool == pool) return;
         _reservePool = pool;
         emit ReservePoolUpdated(pool);
     }
@@ -87,6 +92,7 @@ contract SettingManagement is SingleAdminAccessControl {
     }
 
     function setReserveTarget(uint256 target) external onlyAdmin {
+        if (_reserveTarget == target) return;
         _reserveTarget = target;
         emit ReserveTargetUpdated(target);
     }

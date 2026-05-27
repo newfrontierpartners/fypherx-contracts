@@ -16,13 +16,13 @@ import "../interfaces/ISettingManagement.sol";
  *           pools[0] = RUSD,  weightBps = 10_000  (1x)
  *           pools[1] = FYUSD, weightBps = 20_000  (2x)
  *
- *         FPY rewards accrue per block, weighted by pool:
+ *         Reward emissions accrue per block, weighted by pool:
  *
  *           rewardPerBlock_pool = fpyPerBlock × pool.weightBps / totalAllocBps
  *           accFpyPerShare_pool += rewardPerBlock_pool × 1e18 / pool.totalStaked
  *           pendingFpy(user, pool) = stake.amount × accFpyPerShare / 1e18 - stake.fpyDebt
  *
- *         The "FPY_per_block × pool_weight × user_share" formula in the
+ *         The "FYP_per_block × pool_weight × user_share" formula in the
  *         spec collapses to MasterChef-style accumulator math.
  *
  *         Per-pool pause is pauser-or-admin (ADR-008); unpause is admin-only.
@@ -32,6 +32,23 @@ import "../interfaces/ISettingManagement.sol";
  *
  * @dev Upgradeable (TransparentProxy). Tracked decisions: ADR-003,
  *      ADR-007 (pauser carve-out), ADR-008 (per-pool pause).
+ *
+ * @dev <b>FYP-49 — FPY / FYP naming decision</b>. CertiK noted that
+ *      the hub uses {fpy}, {fpyPerBlock}, {pendingFpy},
+ *      {accFpyPerShare}, {fpyDebt}, {InsufficientFpy}, etc., while
+ *      the protocol's governance token is named "FYP" (not "FPY").
+ *      The mismatch is historical: an early draft of the spec used
+ *      FPY before the token was renamed FYP. The internal identifiers
+ *      are intentionally retained because:
+ *      (a) the storage slots are live in the deployed proxy; renaming
+ *          the SLOTS is unsafe across an upgrade,
+ *      (b) the function selectors are baked into backend Web3j
+ *          bindings (fypherx-risk-service.staking.* calls) and
+ *          renaming the SELECTORS would require a coordinated cutover.
+ *      The on-chain token address resolves to FYP regardless — the
+ *      {fpy} field accepts whatever IERC20 the initializer was given.
+ *      Frontend / docs should use "FYP" consistently; the hub's
+ *      internal names are a closed implementation detail.
  */
 contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
@@ -149,15 +166,17 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
      */
     function addPool(IERC20 underlying, uint64 weightBps) external onlyAdmin returns (uint256 poolId) {
         if (address(underlying) == address(0)) revert ZeroAddress();
+        // FYP-38: cache .length so the duplicate check and the settle
+        // sweep share a single SLOAD.
+        uint256 n = _pools.length;
         // Reject duplicate underlying — operator error guard.
-        for (uint256 i = 0; i < _pools.length; ++i) {
+        for (uint256 i = 0; i < n; ++i) {
             if (address(_pools[i].underlying) == address(underlying)) revert PoolAlreadyExists(address(underlying));
         }
         // Settle every existing pool under the old totalAllocBps
         // before we change it. Without this, every still-unsettled
         // pool would later have its accrued window repriced at the
         // new denominator (FYP-05 PoC).
-        uint256 n = _pools.length;
         for (uint256 i = 0; i < n; ++i) _updatePool(i);
 
         _pools.push(Pool({
@@ -188,16 +207,22 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         onlyAdmin
         validPool(poolId)
     {
-        uint256 n = _pools.length;
-        for (uint256 i = 0; i < n; ++i) _updatePool(i);
         Pool storage p = _pools[poolId];
         uint64 old = p.weightBps;
+        // FYP-39: no-op early-return BEFORE settling every pool, so a
+        // dashboard "set weight to same value" tx pays neither the
+        // mass-update gas nor the SSTORE.
+        if (newWeightBps == old) return;
+        uint256 n = _pools.length;
+        for (uint256 i = 0; i < n; ++i) _updatePool(i);
         totalAllocBps = totalAllocBps - old + newWeightBps;
         p.weightBps = newWeightBps;
         emit PoolWeightUpdated(poolId, old, newWeightBps);
     }
 
     function setFpyPerBlock(uint256 newRate) external onlyAdmin {
+        // FYP-39: no-op early-return BEFORE the mass-update.
+        if (newRate == fpyPerBlock) return;
         // Settle every pool under the OLD rate so users get the rewards
         // accrued at the previous emission level.
         uint256 n = _pools.length;
@@ -207,6 +232,8 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;
     }
@@ -246,14 +273,16 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         _updatePool(poolId);
 
         Pool storage p = _pools[poolId];
+        // FYP-38: cache .length — calldata read once.
+        uint256 batchLen = users.length;
         uint256 total;
-        for (uint256 i = 0; i < amounts.length; ++i) {
+        for (uint256 i = 0; i < batchLen; ++i) {
             total += amounts[i];
         }
         if (total == 0) revert ZeroAmount();
         p.underlying.safeTransferFrom(msg.sender, address(this), total);
 
-        for (uint256 i = 0; i < users.length; ++i) {
+        for (uint256 i = 0; i < batchLen; ++i) {
             address u = users[i];
             uint256 amt = amounts[i];
             if (u == address(0)) revert ZeroAddress();

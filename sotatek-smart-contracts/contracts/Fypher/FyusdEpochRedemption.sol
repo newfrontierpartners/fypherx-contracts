@@ -460,8 +460,10 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
 
     // ── Admin ──
 
+    // FYP-39: all setters below skip the SSTORE + event when unchanged.
     function setSupportedAsset(address asset, bool supported) external onlyAdmin {
         if (asset == address(0)) revert ZeroAddress();
+        if (supportedAssets[asset] == supported) return;
         supportedAssets[asset] = supported;
         emit SupportedAssetSet(asset, supported);
     }
@@ -470,6 +472,7 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
         if (!paused) {
             if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
         }
+        if (requestPaused[asset] == paused) return;
         requestPaused[asset] = paused;
         emit RequestPausedSet(asset, paused);
     }
@@ -478,23 +481,27 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
         if (!paused) {
             if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
         }
+        if (settlementPaused == paused) return;
         settlementPaused = paused;
         emit SettlementPausedSet(paused);
     }
 
     function setBackendSigner(address newSigner) external onlyAdmin {
         if (newSigner == address(0)) revert ZeroAddress();
+        if (newSigner == backendSigner) return;
         emit BackendSignerUpdated(backendSigner, newSigner);
         backendSigner = newSigner;
     }
 
     function setBackendExecutor(address newExecutor) external onlyAdmin {
         if (newExecutor == address(0)) revert ZeroAddress();
+        if (newExecutor == backendExecutor) return;
         emit BackendExecutorUpdated(backendExecutor, newExecutor);
         backendExecutor = newExecutor;
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;
     }
