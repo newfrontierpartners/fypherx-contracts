@@ -45,7 +45,12 @@ async function deployFixture(apyBps = 400n) {
   await (await fyusd.setMinter(deployer.address)).wait();
 
   const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-  const adapter = await MockAdapter.deploy(await fyusd.getAddress(), apyBps);
+  // vault=0 keeps the mock in legacy free-for-all mode so the standalone
+  // MockConcreteAdapter test below (which deposits via alice directly,
+  // bypassing the vault) keeps working. The vault-as-tenant flow
+  // exercised in the FyusdYieldVault describe block also works because
+  // free-for-all mode accepts the vault as a caller too.
+  const adapter = await MockAdapter.deploy(await fyusd.getAddress(), apyBps, ethers.ZeroAddress);
 
   const Vault = await ethers.getContractFactory("FyusdYieldVault");
   const vault = await upgrades.deployProxy(Vault, [
@@ -186,13 +191,20 @@ describe("FyusdYieldVault (vFYUSD ERC4626)", () => {
     it("direct withdraw and redeem revert (cooldown-only exit)", async () => {
       const { alice, vault } = await deployFixture();
       await (await vault.connect(alice).deposit(500n * ONE, alice.address)).wait();
+      // FYP-34 patch: {maxWithdraw} / {maxRedeem} now return 0, so
+      // the OZ ERC4626 withdraw entry-point reverts with the
+      // upstream {ERC4626ExceededMaxWithdraw} / {ERC4626ExceededMaxRedeem}
+      // before our internal {_withdraw} ever runs. Either error path
+      // signals the same thing — synchronous exits are not allowed.
       await assert.rejects(
         vault.connect(alice).withdraw(100n * ONE, alice.address, alice.address),
-        (err) => err.message.includes("use cooldown flow"),
+        (err) => err.message.includes("ERC4626ExceededMaxWithdraw") ||
+                 err.message.includes("use cooldown flow"),
       );
       await assert.rejects(
         vault.connect(alice).redeem(100n * ONE, alice.address, alice.address),
-        (err) => err.message.includes("use cooldown flow"),
+        (err) => err.message.includes("ERC4626ExceededMaxRedeem") ||
+                 err.message.includes("use cooldown flow"),
       );
     });
   });
@@ -229,7 +241,7 @@ describe("FyusdYieldVault (vFYUSD ERC4626)", () => {
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const otherToken = await MockERC20.deploy("Other", "OTH", 18);
       const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-      const wrongAdapter = await MockAdapter.deploy(await otherToken.getAddress(), 100n);
+      const wrongAdapter = await MockAdapter.deploy(await otherToken.getAddress(), 100n, ethers.ZeroAddress);
       await assert.rejects(
         vault.setAdapter(await wrongAdapter.getAddress()),
         (err) => err.message.includes("AdapterAssetMismatch"),
@@ -246,21 +258,8 @@ describe("FyusdYieldVault (vFYUSD ERC4626)", () => {
   });
 });
 
-describe("ConcreteAdapterV1 (mainnet stub)", () => {
-  it("reverts NotImplemented on every state-changing call", async () => {
-    const [deployer] = await ethers.getSigners();
-    const FYUSD = await ethers.getContractFactory("FYUSD");
-    const fyusd = await upgrades.deployProxy(FYUSD, [deployer.address], {
-      initializer: "initialize", kind: "transparent",
-    });
-    const Stub = await ethers.getContractFactory("ConcreteAdapterV1");
-    const stub = await Stub.deploy(await fyusd.getAddress(), deployer.address);
-
-    assert.equal(await stub.asset(), await fyusd.getAddress());
-    await assert.rejects(stub.deposit(1n), (err) => err.message.includes("NotImplemented"));
-    await assert.rejects(stub.withdraw(1n), (err) => err.message.includes("NotImplemented"));
-    await assert.rejects(stub.totalAssets(), (err) => err.message.includes("NotImplemented"));
-    await assert.rejects(stub.shareOf(deployer.address), (err) => err.message.includes("NotImplemented"));
-    await assert.rejects(stub.realizedYield7d(), (err) => err.message.includes("NotImplemented"));
-  });
-});
+// ConcreteAdapterV1 used to be a stub that reverted NotImplemented on
+// every state-changing call. As of feat/concrete-adapter-v1-impl, it's
+// a live binding against a Concrete Earn V2 ERC-4626 vault. Real-
+// implementation coverage (deposit / withdraw / yield accrual / share
+// isolation) lives in test/ConcreteAdapterV1.test.js.

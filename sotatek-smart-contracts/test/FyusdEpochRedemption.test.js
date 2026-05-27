@@ -28,21 +28,30 @@ async function nowPlus(seconds) {
   return BigInt(blk.timestamp + seconds);
 }
 
-async function signRedeemQuote(signer, quote) {
-  const orderHash = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256", "uint256", "address", "uint256", "uint256"],
-      [
-        quote.user,
-        quote.epochId,
-        quote.fyusdAmount,
-        quote.targetAsset,
-        quote.nonce,
-        quote.expiry,
-      ],
-    ),
-  );
-  return signer.signMessage(ethers.getBytes(orderHash));
+/**
+ * Sign a RedeemQuote using the EIP-712 envelope post-FYP-07.
+ */
+async function signRedeemQuote(signer, quote, redemption) {
+  const verifyingContract =
+    typeof redemption === "string" ? redemption : await redemption.getAddress();
+  const { chainId } = await ethers.provider.getNetwork();
+  const domain = {
+    name: "FyusdEpochRedemption",
+    version: "1",
+    chainId,
+    verifyingContract,
+  };
+  const types = {
+    RedeemQuote: [
+      { name: "user", type: "address" },
+      { name: "epochId", type: "uint256" },
+      { name: "fyusdAmount", type: "uint256" },
+      { name: "targetAsset", type: "address" },
+      { name: "nonce", type: "uint256" },
+      { name: "expiry", type: "uint256" },
+    ],
+  };
+  return signer.signTypedData(domain, types, quote);
 }
 
 async function deployFixture() {
@@ -145,7 +154,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         fyusdAmount: 200n * ONE, targetAsset: await usdt.getAddress(),
         nonce: 1n, expiry: await nowPlus(3600),
       };
-      const sig = await signRedeemQuote(backend, quote);
+      const sig = await signRedeemQuote(backend, quote, redemption);
       await (await redemption.connect(alice).requestRedeem(quote, sig)).wait();
 
       assert.equal(await fyusd.balanceOf(alice.address), aliceBal0 - 200n * ONE);
@@ -167,7 +176,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         fyusdAmount: 100n * ONE, targetAsset: await usdt.getAddress(),
         nonce: 1n, expiry: await nowPlus(3600),
       };
-      const sig = await signRedeemQuote(backend, quote);
+      const sig = await signRedeemQuote(backend, quote, redemption);
       await assert.rejects(
         redemption.connect(alice).requestRedeem(quote, sig),
         (err) => err.message.includes("InvalidState") || err.message.includes("EpochAlreadyLocked"),
@@ -185,7 +194,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         nonce: 1n, expiry: await nowPlus(3600),
       };
       await assert.rejects(
-        redemption.connect(alice).requestRedeem(bad, await signRedeemQuote(backend, bad)),
+        redemption.connect(alice).requestRedeem(bad, await signRedeemQuote(backend, bad, redemption)),
         (err) => err.message.includes("UnsupportedAsset"),
       );
 
@@ -196,7 +205,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         nonce: 2n, expiry: 1n,
       };
       await assert.rejects(
-        redemption.connect(alice).requestRedeem(stale, await signRedeemQuote(backend, stale)),
+        redemption.connect(alice).requestRedeem(stale, await signRedeemQuote(backend, stale, redemption)),
         (err) => err.message.includes("ExpiredQuote"),
       );
 
@@ -206,7 +215,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         targetAsset: await usdt.getAddress(),
         nonce: 3n, expiry: await nowPlus(3600),
       };
-      const sig = await signRedeemQuote(backend, ok);
+      const sig = await signRedeemQuote(backend, ok, redemption);
       await (await redemption.connect(alice).requestRedeem(ok, sig)).wait();
       await assert.rejects(
         redemption.connect(alice).requestRedeem(ok, sig),
@@ -222,7 +231,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         targetAsset: await usdt.getAddress(),
         nonce: 1n, expiry: await nowPlus(3600),
       };
-      const wrongSig = await signRedeemQuote(nonAdmin, quote);
+      const wrongSig = await signRedeemQuote(nonAdmin, quote, redemption);
       await assert.rejects(
         redemption.connect(alice).requestRedeem(quote, wrongSig),
         (err) => err.message.includes("InvalidSignature"),
@@ -239,7 +248,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
           user: u.address, epochId: 1n, fyusdAmount: amt * ONE,
           targetAsset: await usdt.getAddress(), nonce: n, expiry: await nowPlus(3600),
         };
-        await (await redemption.connect(u).requestRedeem(q, await signRedeemQuote(backend, q))).wait();
+        await (await redemption.connect(u).requestRedeem(q, await signRedeemQuote(backend, q, redemption))).wait();
       }
       await increaseTime(TEN_HOURS + 1n);
       await (await redemption.lockEpoch(1n)).wait();
@@ -295,7 +304,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         user: alice.address, epochId: 1n, fyusdAmount: 100n * ONE,
         targetAsset: await usdt.getAddress(), nonce: 1n, expiry: await nowPlus(3600),
       };
-      await (await redemption.connect(alice).requestRedeem(q, await signRedeemQuote(backend, q))).wait();
+      await (await redemption.connect(alice).requestRedeem(q, await signRedeemQuote(backend, q, redemption))).wait();
       await increaseTime(TEN_HOURS + 1n);
       await (await redemption.lockEpoch(1n)).wait();
 
@@ -342,7 +351,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         user: alice.address, epochId: 1n, fyusdAmount: 250n * ONE,
         targetAsset: await usdt.getAddress(), nonce: 1n, expiry: await nowPlus(3600),
       };
-      await (await redemption.connect(alice).requestRedeem(q, await signRedeemQuote(backend, q))).wait();
+      await (await redemption.connect(alice).requestRedeem(q, await signRedeemQuote(backend, q, redemption))).wait();
 
       const aliceBalAfterRequest = await fyusd.balanceOf(alice.address);
       await (await redemption.cancelEpoch(1n, ethers.id("Bitgo SLA breach"))).wait();
@@ -361,7 +370,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
           user: u.address, epochId: 1n, fyusdAmount: amt * ONE,
           targetAsset: await usdt.getAddress(), nonce: n, expiry: await nowPlus(3600),
         };
-        await (await redemption.connect(u).requestRedeem(q, await signRedeemQuote(backend, q))).wait();
+        await (await redemption.connect(u).requestRedeem(q, await signRedeemQuote(backend, q, redemption))).wait();
       }
 
       await assert.rejects(
@@ -390,13 +399,13 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         targetAsset: await usdt.getAddress(), nonce: 1n, expiry: await nowPlus(3600),
       };
       await assert.rejects(
-        redemption.connect(alice).requestRedeem(q, await signRedeemQuote(backend, q)),
+        redemption.connect(alice).requestRedeem(q, await signRedeemQuote(backend, q, redemption)),
         (err) => err.message.includes("RequestPausedForAsset"),
       );
 
       // USDC still works
       const q2 = { ...q, targetAsset: await usdc.getAddress(), nonce: 2n };
-      await (await redemption.connect(alice).requestRedeem(q2, await signRedeemQuote(backend, q2))).wait();
+      await (await redemption.connect(alice).requestRedeem(q2, await signRedeemQuote(backend, q2, redemption))).wait();
     });
 
     it("pauser cannot un-pause; only admin can", async () => {
@@ -416,7 +425,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         user: alice.address, epochId: 1n, fyusdAmount: 100n * ONE,
         targetAsset: await usdt.getAddress(), nonce: 1n, expiry: await nowPlus(3600),
       };
-      await (await redemption.connect(alice).requestRedeem(q, await signRedeemQuote(backend, q))).wait();
+      await (await redemption.connect(alice).requestRedeem(q, await signRedeemQuote(backend, q, redemption))).wait();
       await increaseTime(TEN_HOURS + 1n);
       await (await redemption.lockEpoch(1n)).wait();
       await (await redemption.connect(pauser).setSettlementPaused(true)).wait();
@@ -435,7 +444,7 @@ describe("FyusdEpochRedemption (ADR-011)", () => {
         user: alice.address, epochId: 1n, fyusdAmount: 1n * ONE,
         targetAsset: await usdt.getAddress(), nonce: 1n, expiry: await nowPlus(3600),
       };
-      const oldSig = await signRedeemQuote(backend, q);
+      const oldSig = await signRedeemQuote(backend, q, redemption);
       await (await redemption.connect(deployer).setBackendSigner(nonAdmin.address)).wait();
       await assert.rejects(
         redemption.connect(alice).requestRedeem(q, oldSig),

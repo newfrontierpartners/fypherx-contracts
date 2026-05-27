@@ -39,10 +39,40 @@ import "../interfaces/ISettingManagement.sol";
  *         is the on-chain ledger of "what does ETH oracle deviation
  *         mean, in concrete pause terms" — auditable forever.
  *
+ *         <p><b>FYP-18 — unpauseCalls are an off-chain template by
+ *         design</b>. The {Trigger.unpauseCalls} array is recorded
+ *         and validated during {registerTrigger} / {updateTrigger},
+ *         but {reset} deliberately does NOT iterate it on-chain.
+ *         Reason: under SingleAdminAccessControl, the breaker holds
+ *         pauserRole on each target (so it can call setXxxPaused
+ *         with paused=true) but NOT admin role — every target's
+ *         unpause path is admin-only (ADR-007 asymmetric authorisation).
+ *         So the breaker cannot execute the unpause subcalls itself;
+ *         the multisig must submit them directly.
+ *
+ *         The unpauseCalls array is therefore an on-chain TEMPLATE
+ *         that the multisig dashboard reads (via {unpauseCallAt}) to
+ *         pre-fill the exact (target, calldata) tuples a human
+ *         operator should sign on the Safe UI. CertiK suggested
+ *         moving this template into a TriggerRegistered event field
+ *         to drop storage cost. We chose to keep it in storage so
+ *         the dashboard does not depend on a log-indexer being up at
+ *         incident time (latency-critical). The storage cost is
+ *         paid once per trigger (4-8 triggers total expected), not
+ *         per trip, so the trade is acceptable.
+ *
  * @dev Tracked decisions: ADR-007 (multisig as admin), ADR-008
  *      (per-asset pause), ADR-009 (audit ledger).
  */
 contract FypherCircuitBreaker is Initializable, ReentrancyGuardUpgradeable {
+
+    // ── Constants ──
+    /// @notice FYP-50 patch. Cap on pause / unpause call slots per
+    ///         trigger. 16 fits comfortably more than the 5-7 target
+    ///         contracts each named trigger pauses in practice, and
+    ///         keeps {trip} below the gas-budget pain point at
+    ///         incident time.
+    uint256 public constant MAX_CALLS_PER_TRIGGER = 16;
 
     // ── Types ──
 
@@ -85,6 +115,9 @@ contract FypherCircuitBreaker is Initializable, ReentrancyGuardUpgradeable {
     error ZeroAddress();
     error EmptyTrigger();
     error SubcallReverted(uint256 callIndex, address target, bytes returnData);
+    /// @notice FYP-50: too many pause/unpause calls registered for
+    ///         this trigger.
+    error CallsetTooLarge(uint256 length, uint256 cap);
 
     // ── Init ──
 
@@ -134,20 +167,29 @@ contract FypherCircuitBreaker is Initializable, ReentrancyGuardUpgradeable {
         Call[] calldata pauseCalls,
         Call[] calldata unpauseCalls
     ) external onlyAdmin returns (uint256 triggerId) {
-        if (pauseCalls.length == 0) revert EmptyTrigger();
+        uint256 pauseLen = pauseCalls.length;
+        if (pauseLen == 0) revert EmptyTrigger();
+        // FYP-50: callset caps so {trip} stays affordable at incident
+        // time. Apply to both arrays — unpauseCalls is dashboard
+        // template only, but the storage cost is still amortised by
+        // the same cap.
+        if (pauseLen > MAX_CALLS_PER_TRIGGER) revert CallsetTooLarge(pauseLen, MAX_CALLS_PER_TRIGGER);
+        uint256 unpauseLen = unpauseCalls.length;
+        if (unpauseLen > MAX_CALLS_PER_TRIGGER) revert CallsetTooLarge(unpauseLen, MAX_CALLS_PER_TRIGGER);
         triggerId = _triggers.length;
         Trigger storage t = _triggers.push();
         t.name = name;
         t.description = description;
-        for (uint256 i = 0; i < pauseCalls.length; ++i) {
+        // FYP-38: cache .length to avoid re-reading per iteration.
+        for (uint256 i = 0; i < pauseLen; ++i) {
             if (pauseCalls[i].target == address(0)) revert ZeroAddress();
             t.pauseCalls.push(pauseCalls[i]);
         }
-        for (uint256 i = 0; i < unpauseCalls.length; ++i) {
+        for (uint256 i = 0; i < unpauseLen; ++i) {
             if (unpauseCalls[i].target == address(0)) revert ZeroAddress();
             t.unpauseCalls.push(unpauseCalls[i]);
         }
-        emit TriggerRegistered(triggerId, name, pauseCalls.length);
+        emit TriggerRegistered(triggerId, name, pauseLen);
     }
 
     /**
@@ -163,21 +205,33 @@ contract FypherCircuitBreaker is Initializable, ReentrancyGuardUpgradeable {
         Call[] calldata unpauseCalls
     ) external onlyAdmin {
         if (triggerId >= _triggers.length) revert TriggerNotFound(triggerId);
-        if (pauseCalls.length == 0) revert EmptyTrigger();
+        uint256 pauseLen = pauseCalls.length;
+        if (pauseLen == 0) revert EmptyTrigger();
+        if (pauseLen > MAX_CALLS_PER_TRIGGER) revert CallsetTooLarge(pauseLen, MAX_CALLS_PER_TRIGGER);
+        uint256 unpauseLen = unpauseCalls.length;
+        if (unpauseLen > MAX_CALLS_PER_TRIGGER) revert CallsetTooLarge(unpauseLen, MAX_CALLS_PER_TRIGGER);
         Trigger storage t = _triggers[triggerId];
+        // FYP-56 patch. Refuse to overwrite a tripped trigger — the
+        // pause-call set is currently in-effect against its targets,
+        // so the on-chain "what was tripped" ledger entry from the
+        // {Tripped} event must keep matching the stored
+        // {pauseCalls}. Operators who actually want to edit a
+        // tripped trigger should {reset} first.
+        if (t.tripped) revert AlreadyTripped();
         t.name = name;
         t.description = description;
         delete t.pauseCalls;
         delete t.unpauseCalls;
-        for (uint256 i = 0; i < pauseCalls.length; ++i) {
+        // FYP-38: cache .length to avoid re-reading per iteration.
+        for (uint256 i = 0; i < pauseLen; ++i) {
             if (pauseCalls[i].target == address(0)) revert ZeroAddress();
             t.pauseCalls.push(pauseCalls[i]);
         }
-        for (uint256 i = 0; i < unpauseCalls.length; ++i) {
+        for (uint256 i = 0; i < unpauseLen; ++i) {
             if (unpauseCalls[i].target == address(0)) revert ZeroAddress();
             t.unpauseCalls.push(unpauseCalls[i]);
         }
-        emit TriggerRegistered(triggerId, name, pauseCalls.length);
+        emit TriggerRegistered(triggerId, name, pauseLen);
     }
 
     // ── Trip / Reset ──
@@ -201,7 +255,9 @@ contract FypherCircuitBreaker is Initializable, ReentrancyGuardUpgradeable {
         if (t.tripped) revert AlreadyTripped();
         t.tripped = true;
         t.trippedAt = uint64(block.timestamp);
-        for (uint256 i = 0; i < t.pauseCalls.length; ++i) {
+        // FYP-38: cache .length once — storage SLOAD only on first read.
+        uint256 callLen = t.pauseCalls.length;
+        for (uint256 i = 0; i < callLen; ++i) {
             (bool ok, bytes memory ret) = t.pauseCalls[i].target.call(t.pauseCalls[i].data);
             if (!ok) revert SubcallReverted(i, t.pauseCalls[i].target, ret);
         }
@@ -241,6 +297,13 @@ contract FypherCircuitBreaker is Initializable, ReentrancyGuardUpgradeable {
     // ── Admin ──
 
     function setWatchdog(address newWatchdog) external onlyAdmin {
+        // FYP-25: zero watchdog is a footgun — the {onlyWatchdogOrAdmin}
+        // modifier would still let the admin trip, but external
+        // dashboards that read {watchdog} for "who can trip" would
+        // see address(0) and assume the role is intentionally unset.
+        if (newWatchdog == address(0)) revert ZeroAddress();
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newWatchdog == watchdog) return;
         emit WatchdogUpdated(watchdog, newWatchdog);
         watchdog = newWatchdog;
     }

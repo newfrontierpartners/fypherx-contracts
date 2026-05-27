@@ -120,6 +120,8 @@ contract FYUSD is
 
     function setMinter(address newMinter) external onlyOwner {
         if (newMinter == address(0)) revert ZeroAddress();
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newMinter == _minter) return;
         emit MinterUpdated(_minter, newMinter);
         _minter = newMinter;
     }
@@ -131,6 +133,8 @@ contract FYUSD is
      */
     function setEmergencyMinter(address newEmergencyMinter) external onlyOwner {
         if (newEmergencyMinter == address(0)) revert ZeroAddress();
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newEmergencyMinter == _emergencyMinter) return;
         emit EmergencyMinterUpdated(_emergencyMinter, newEmergencyMinter);
         _emergencyMinter = newEmergencyMinter;
     }

@@ -25,7 +25,7 @@
  *   - FYUSD impl upgrade (S1.3a — emergencyMint). Same reasoning.
  *
  *   - Multisig migration (S1.7). Requires the per-network signer
- *     set in `multisig-signers.bscTestnet.json` (gitignored) — see
+ *     set in `multisig-signers.hoodi.json` (gitignored) — see
  *     `scripts/multisig/deploy-safe.js` + `transfer-admin.js` to
  *     run that ceremony separately.
  *
@@ -52,7 +52,7 @@
  *
  * Usage
  * ─────
- *   npx hardhat run scripts/deploy-phase1.js --network bscTestnet
+ *   npx hardhat run scripts/deploy-phase1.js --network hoodi
  *
  * Required env (loaded from .env):
  *   PRIVATE_KEY           deployer EOA (must hold testnet BNB for gas)
@@ -128,7 +128,11 @@ async function main() {
   if (!addrs.MockConcreteAdapter) {
     console.log("── Deploy MockConcreteAdapter ──");
     const MockAdapter = await ethers.getContractFactory("MockConcreteAdapter");
-    const adapter = await MockAdapter.deploy(addrs.FYUSD, DEFAULT_MOCK_CONCRETE_APY_BPS);
+    // vault=0 = legacy free-for-all mode. The post-FYP-01 single-tenant
+    // model is only enforced by the production ConcreteAdapterV1; the
+    // mock keeps free-for-all so this monolithic script can deploy the
+    // adapter before the vault proxy without a two-step bind.
+    const adapter = await MockAdapter.deploy(addrs.FYUSD, DEFAULT_MOCK_CONCRETE_APY_BPS, ethers.ZeroAddress);
     await adapter.waitForDeployment();
     addrs.MockConcreteAdapter = await adapter.getAddress();
     console.log(`  ✓ MockConcreteAdapter @ ${addrs.MockConcreteAdapter}  (apy = ${DEFAULT_MOCK_CONCRETE_APY_BPS} bps)`);
@@ -267,7 +271,50 @@ async function main() {
     return "  ✓ added";
   });
 
-  // ── Wire 4: BurnQueue + EpochSettlement supported assets ──
+  // ── Wire 4a: FypherMinting full setup (assets + signer + custodian) ──
+  // Three separate rows on FypherMinting that the original Phase-1
+  // wiring forgot to populate. Each missing row produces a
+  // distinctive on-chain revert when the customer attempts to mint:
+  //
+  //   - supportedAssets[asset]      ← UnsupportedAsset()    0x24a01144
+  //   - backendSigner               ← InvalidSignature()    0x8baa579f
+  //   - custodianAddresses[dest]    ← InvalidRoute()        0x84e505d2
+  //
+  // Defaults below are dev-cluster appropriate (gateway-EOA from
+  // BACKEND_SIGNER_PRIVATE_KEY; deployer EOA as the temporary
+  // custodian). Override via env when re-running on mainnet:
+  //   GATEWAY_SIGNER=0x... GATEWAY_CUSTODIAN=0x... npx hardhat run …
+  const GATEWAY_SIGNER    = process.env.GATEWAY_SIGNER    || "0x31B60b11533c97b5ED7b1B650D31855F3754Acb4";
+  const GATEWAY_CUSTODIAN = process.env.GATEWAY_CUSTODIAN || (await ethers.getSigners())[0].address;
+
+  for (const [assetSym, assetAddr] of [["USDT", addrs.USDT], ["USDC", addrs.USDC]]) {
+    await tryTx(`FypherMinting.addSupportedAsset(${assetSym})`, async () => {
+      const minting = await ethers.getContractAt("FypherMinting", addrs.FypherMinting);
+      const already = await minting.supportedAssets(assetAddr);
+      if (already) return "  ✓ already supported";
+      const tx = await minting.addSupportedAsset(assetAddr);
+      await tx.wait();
+      return "  ✓ added";
+    });
+  }
+  await tryTx(`FypherMinting.setBackendSigner(${GATEWAY_SIGNER})`, async () => {
+    const minting = await ethers.getContractAt("FypherMinting", addrs.FypherMinting);
+    const cur = await minting.backendSigner();
+    if (cur.toLowerCase() === GATEWAY_SIGNER.toLowerCase()) return "  ✓ already set";
+    const tx = await minting.setBackendSigner(GATEWAY_SIGNER);
+    await tx.wait();
+    return `  ✓ set (was ${cur})`;
+  });
+  await tryTx(`FypherMinting.addCustodianAddress(${GATEWAY_CUSTODIAN})`, async () => {
+    const minting = await ethers.getContractAt("FypherMinting", addrs.FypherMinting);
+    const already = await minting.custodianAddresses(GATEWAY_CUSTODIAN);
+    if (already) return "  ✓ already registered";
+    const tx = await minting.addCustodianAddress(GATEWAY_CUSTODIAN);
+    await tx.wait();
+    return "  ✓ added";
+  });
+
+  // ── Wire 4b: BurnQueue + EpochSettlement supported assets ──
   for (const [assetSym, assetAddr] of [["USDT", addrs.USDT], ["USDC", addrs.USDC]]) {
     await tryTx(`BurnQueue.setSupportedAsset(${assetSym}, true)`, async () => {
       const burnQueue = await ethers.getContractAt("FypherBurnQueue", addrs.FypherBurnQueue);

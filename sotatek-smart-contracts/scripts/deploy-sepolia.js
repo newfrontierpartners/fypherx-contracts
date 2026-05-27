@@ -8,7 +8,7 @@
  * vice-versa.
  *
  * Note: deploy.js currently allows MockERC20 deployment only on
- * hardhat / localhost / bscTestnet (see ALLOWED_MOCK_NETWORKS). On
+ * hardhat / localhost / sepolia (see ALLOWED_MOCK_NETWORKS). On
  * Sepolia those mocks are disabled — the deploy script must be wired
  * against real (or already-deployed sandbox) USDT/USDC/etc. Wire that
  * before running this entrypoint.

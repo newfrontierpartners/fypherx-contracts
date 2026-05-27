@@ -1,0 +1,7 @@
+{
+  "tool_name": "Read",
+  "tool_input_preview": "{\"file_path\":\"/Users/jackbereson/Projects/fypher-x/fypherx-contracts/sotatek-smart-contracts/test/MockERC20.sol\"}",
+  "error": "File does not exist. Note: your current working directory is /Users/jackbereson/Projects/fypher-x/fypherx-contracts/sotatek-smart-contracts.",
+  "timestamp": "2026-05-08T07:52:51.679Z",
+  "retry_count": 1
+}

@@ -9,6 +9,7 @@
 pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 error UnauthorizedCaller();
 
@@ -27,6 +28,8 @@ error UnauthorizedCaller();
  *   stAUSDSilo — STAKING_VAULT = stAUSD      (0x57B7…Ffda), TOKEN = FYUSD (0x9FC6…bEd9)
  */
 contract RUSDSilo {
+    using SafeERC20 for IERC20;
+
     IERC20  public immutable TOKEN;
     address public immutable STAKING_VAULT;
 
@@ -35,9 +38,15 @@ contract RUSDSilo {
         TOKEN = _token;
     }
 
-    /// @notice Transfer `amount` of TOKEN to `to`. Only callable by STAKING_VAULT.
+    /// @notice Transfer `amount` of TOKEN to `to`. Only callable by
+    ///         STAKING_VAULT.
+    /// @dev FYP-12 patch. The previous body used `TOKEN.transfer` which
+    ///      assumes every ERC-20 reverts on failure. Some tokens return
+    ///      `false` instead (the spec allows it), and the bare-transfer
+    ///      shape would silently no-op. SafeERC20.safeTransfer reverts
+    ///      on either failure mode.
     function withdraw(address to, uint256 amount) external {
         if (msg.sender != STAKING_VAULT) revert UnauthorizedCaller();
-        TOKEN.transfer(to, amount);
+        TOKEN.safeTransfer(to, amount);
     }
 }

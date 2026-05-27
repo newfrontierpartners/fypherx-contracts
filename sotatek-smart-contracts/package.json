@@ -4,7 +4,7 @@
   "description": "Fypher Protocol Smart Contracts",
   "scripts": {
     "compile": "npx hardhat compile",
-    "deploy:testnet": "npx hardhat run scripts/deploy.js --network bscTestnet",
+    "deploy:testnet": "npx hardhat run scripts/deploy.js --network hoodi",
     "deploy:local": "npx hardhat run scripts/deploy.js --network hardhat",
     "test": "npx hardhat test"
   },

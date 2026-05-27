@@ -37,9 +37,11 @@ abstract contract SingleAdminAccessControl is Initializable {
      *      per-role admin hierarchy à la OpenZeppelin AccessControl,
      *      but the implementation below routes every grant/revoke
      *      through the single `_admin` slot via the `onlyAdmin`
-     *      modifier. This mapping is never written and
-     *      {getRoleAdmin} always returns `bytes32(0)`. Kept in place
-     *      to preserve storage layout under TransparentProxy.
+     *      modifier. This mapping is never written. We RETAIN the
+     *      slot for TransparentProxy storage-layout safety; the
+     *      external {getRoleAdmin} accessor (and the {onlyRole}
+     *      modifier) were dropped in the FYP-51 patch since no
+     *      production caller relied on either.
      */
     mapping(bytes32 => bytes32) private _roleAdmin;
 
@@ -47,6 +49,7 @@ abstract contract SingleAdminAccessControl is Initializable {
     event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
     event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
     event AdminTransferRequested(address indexed currentAdmin, address indexed newAdmin);
+    event AdminTransferCancelled(address indexed currentAdmin, address indexed cancelledPendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
 
     // ── Errors ──
@@ -59,10 +62,10 @@ abstract contract SingleAdminAccessControl is Initializable {
         _;
     }
 
-    modifier onlyRole(bytes32 role) {
-        require(_roles[role][msg.sender], "AccessControl: missing role");
-        _;
-    }
+    // FYP-51 patch: removed the {onlyRole} modifier — no in-scope
+    // call site referenced it, so it was dead surface that
+    // confused reviewers about whether this contract has a
+    // role-graph or just a single-admin model.
 
     function __SingleAdminAccessControl_init(address admin_) internal onlyInitializing {
         if (admin_ == address(0)) revert ZeroAddress();
@@ -71,17 +74,34 @@ abstract contract SingleAdminAccessControl is Initializable {
     }
 
     // ── View ──
+    /// @notice The current admin (alias of {admin()}; retained for
+    ///         Ownable-shaped tooling that expects {owner()}).
     function owner() public view returns (address) {
         return _admin;
+    }
+
+    /// @notice The current admin. Prefer {admin()} over {owner()} for
+    ///         new integrations; the two return the same address.
+    /// @dev FYP-53 patch. Added an explicit getter that matches the
+    ///      single-admin model the contract actually implements,
+    ///      so off-chain tooling does not have to guess from the
+    ///      Ownable-shaped {owner()} alias.
+    function admin() external view returns (address) {
+        return _admin;
+    }
+
+    /// @notice The address staged for the two-step admin handoff.
+    ///         Returns address(0) when no handoff is in flight.
+    /// @dev FYP-52 patch. The slot existed but had no public getter,
+    ///      so multisig dashboards / monitoring couldn't see who was
+    ///      expected to {acceptAdmin}.
+    function pendingAdmin() external view returns (address) {
+        return _pendingAdmin;
     }
 
     function hasRole(bytes32 role, address account) public view returns (bool) {
         if (role == bytes32(0)) return account == _admin;
         return _roles[role][account];
-    }
-
-    function getRoleAdmin(bytes32 role) public view returns (bytes32) {
-        return _roleAdmin[role];
     }
 
     // ── Write ──
@@ -108,12 +128,22 @@ abstract contract SingleAdminAccessControl is Initializable {
      *      slot, a renounce would silently de-sync `hasRole` from
      *      `_admin` (since hasRole(bytes32(0)) reads `_admin`, not
      *      `_roles`).
+     *
+     * @dev FYP-04 patch. SOFT/FULL_RESTRICTED_STAKER_ROLE represent
+     *      admin-imposed compliance state (sanctions / KYC failure /
+     *      etc.), not user-held privileges. Allowing a restricted
+     *      account to self-revoke would let them bypass deposit/
+     *      staking gates immediately after being flagged. These roles
+     *      must only be revocable by admin via {revokeRole} or
+     *      {revokeUserRole}.
      */
     function renounceRole(bytes32 role, address account) external {
         require(account == msg.sender, "Can only renounce own role");
         require(role != bytes32(0), "Cannot renounce admin role");
         require(role != REWARDER_ROLE, "Cannot renounce REWARDER_ROLE");
         require(role != RELEASE_TOKEN_ROLE, "Cannot renounce RELEASE_TOKEN_ROLE");
+        require(role != SOFT_RESTRICTED_STAKER_ROLE, "Cannot renounce SOFT_RESTRICTED_STAKER_ROLE");
+        require(role != FULL_RESTRICTED_STAKER_ROLE, "Cannot renounce FULL_RESTRICTED_STAKER_ROLE");
         _roles[role][account] = false;
         emit RoleRevoked(role, account, msg.sender);
     }
@@ -144,6 +174,23 @@ abstract contract SingleAdminAccessControl is Initializable {
         if (newAdmin == address(0)) revert ZeroAddress();
         _pendingAdmin = newAdmin;
         emit AdminTransferRequested(_admin, newAdmin);
+    }
+
+    /**
+     * @notice Cancel an in-flight admin transfer by clearing
+     *         `_pendingAdmin`. Admin-only — the recipient cannot
+     *         "decline" by calling this; they simply refrain from
+     *         calling {acceptAdmin}.
+     * @dev FYP-52 patch. Pre-patch the only way to cancel a
+     *      mis-targeted transfer was to call {transferAdmin}
+     *      again with a different address — that worked but was
+     *      surprising to operators and left no explicit
+     *      cancellation event in the ledger.
+     */
+    function cancelAdminTransfer() external onlyAdmin {
+        if (_pendingAdmin == address(0)) revert NotPendingAdmin();
+        emit AdminTransferCancelled(_admin, _pendingAdmin);
+        _pendingAdmin = address(0);
     }
 
     function acceptAdmin() external {

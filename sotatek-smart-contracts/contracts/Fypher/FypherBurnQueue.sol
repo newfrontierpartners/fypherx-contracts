@@ -44,6 +44,23 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     /// @notice On-chain enforced burn-to-claim delay (UTC seconds). ADR-001.
     uint64 public constant BURN_DELAY_SECONDS = 7 days;
 
+    // ── EIP-712 (FYP-07 patch) ──
+    /// @notice EIP-712 type-hash for the BurnQuote struct. Binding
+    ///         this into the signed digest gives every signature an
+    ///         action discriminator so a burn-signed quote can never
+    ///         be replayed as a settle/redeem quote in
+    ///         FyusdEpochSettlement / FyusdEpochRedemption (which use
+    ///         their own typehashes).
+    bytes32 public constant BURN_TYPEHASH = keccak256(
+        "BurnQuote(address user,address collateralAsset,uint256 rusdAmount,uint256 collateralAmount,uint256 nonce,uint256 expiry)"
+    );
+
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("FypherBurnQueue"));
+    bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
+
     // ── Types ──
 
     /// @notice Backend-signed quote. The signing scope binds (user, asset,
@@ -94,6 +111,26 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     ///         vault must hold for outstanding tickets.
     mapping(address => uint256) public outstandingLiability;
 
+    // ── Storage append (FYP-24 patch — APPEND-ONLY for proxy safety) ──
+    /**
+     * @notice ADR-007 §"Pauser carve-out". Latency-critical role that
+     *         can only call {setBurnPaused(asset, true)} (the
+     *         {pauseRole} can pause but not unpause; unpausing is
+     *         admin-only). Empty by default — admin must call
+     *         {setPauserRole} after deploy, typically pointing at
+     *         the {FypherCircuitBreaker} so its watchdog-triggered
+     *         {trip} flow can halt burn intake without waiting on
+     *         multisig.
+     *
+     * @dev Before this slot existed, {FypherBurnQueue.setBurnPaused}
+     *      was {onlyAdmin}, so the breaker could not pause burn
+     *      requests even though its NatSpec listed BurnQueue as a
+     *      target (FYP-24). The fix mirrors the pauserRole pattern
+     *      already used by FypherMinting, FypherStakingHub, and the
+     *      epoch contracts.
+     */
+    address public pauserRole;
+
     // ── Events ──
 
     event BurnRequested(
@@ -123,10 +160,13 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     event CollateralAssetSet(address indexed asset, bool supported);
     event BurnPausedSet(address indexed asset, bool paused);
     event BackendSignerUpdated(address indexed oldSigner, address indexed newSigner);
+    event PauserRoleUpdated(address indexed oldPauser, address indexed newPauser);
+    event SurplusSwept(address indexed asset, address indexed to, uint256 amount);
 
     // ── Errors ──
 
     error NotAdmin();
+    error NotPauserOrAdmin();
     error ZeroAddress();
     error ZeroAmount();
     error UnsupportedAsset();
@@ -139,6 +179,9 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     error AlreadyClaimed();
     error InsufficientLiquidity();
     error UserBlacklisted();
+    /// @notice FYP-31: requested sweep would dip below the contract's
+    ///         outstanding liability for that asset.
+    error WouldUnderfundLiability(uint256 surplus, uint256 requested);
 
     // ── Init ──
 
@@ -165,6 +208,16 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
 
     modifier onlyAdmin() {
         if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
+        _;
+    }
+
+    /// @notice FYP-24 patch. pauser EOA OR admin (multisig) can pause.
+    ///         Unpause requires admin only — enforced inside
+    ///         {setBurnPaused}.
+    modifier onlyPauserOrAdmin() {
+        if (msg.sender != pauserRole && !settingManagement.hasRole(bytes32(0), msg.sender)) {
+            revert NotPauserOrAdmin();
+        }
         _;
     }
 
@@ -281,6 +334,38 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     }
 
     /**
+     * @notice Sweep collateral held in excess of the contract's
+     *         outstanding ticket liability for `asset` to `to`.
+     *         Admin-only. Reverts if the requested amount would dip
+     *         the contract's balance below {outstandingLiability}.
+     *
+     * @dev FYP-31 patch. Surplus accumulates when the contract is
+     *      overfunded through {topUp} (ops over-tops to be safe)
+     *      or when users send the collateral asset directly to the
+     *      contract address by mistake. Before this entry point the
+     *      surplus could only be reclaimed by an upgrade or by
+     *      walking it through {emergencyReverse} ticket-by-ticket,
+     *      both of which CertiK flagged as awkward; the comment in
+     *      {topUp} also incorrectly claimed {emergencyReverse} was
+     *      the sweep path even though that function bookkeeps the
+     *      liability counter down.
+     */
+    function sweepSurplus(address asset, address to, uint256 amount)
+        external
+        onlyAdmin
+        nonReentrant
+    {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        uint256 liability = outstandingLiability[asset];
+        uint256 surplus = bal > liability ? bal - liability : 0;
+        if (surplus < amount) revert WouldUnderfundLiability(surplus, amount);
+        IERC20(asset).safeTransfer(to, amount);
+        emit SurplusSwept(asset, to, amount);
+    }
+
+    /**
      * @notice Multisig escape: cancel a ticket without claim. Sends the
      *         locked collateral somewhere else (typically back to
      *         FypherMinting or ReservePool). Does NOT re-mint RUSD — that
@@ -317,19 +402,54 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
 
     function setSupportedAsset(address asset, bool supported) external onlyAdmin {
         if (asset == address(0)) revert ZeroAddress();
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (supportedAssets[asset] == supported) return;
         supportedAssets[asset] = supported;
         emit CollateralAssetSet(asset, supported);
     }
 
-    function setBurnPaused(address asset, bool paused) external onlyAdmin {
+    /**
+     * @notice Per-asset burn pause. Mirrors the
+     *         {FypherMinting.setMintPaused} authorisation pattern:
+     *         pauser OR admin can PAUSE, but only admin can UNPAUSE
+     *         (ADR-007 asymmetric authorisation — default to "stop"
+     *         under operational uncertainty).
+     *
+     * @dev FYP-24 patch. Pre-patch this function was {onlyAdmin}, so
+     *      {FypherCircuitBreaker.trip} could not pause this contract
+     *      even though the breaker's NatSpec listed BurnQueue as a
+     *      target — every {trip} that hit a BurnQueue subcall reverted
+     *      with NotAdmin. The watchdog can now pause without waiting
+     *      on multisig.
+     */
+    function setBurnPaused(address asset, bool paused) external onlyPauserOrAdmin {
+        if (!paused) {
+            // Unpause requires admin (multisig) only.
+            if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
+        }
+        if (burnPaused[asset] == paused) return;
         burnPaused[asset] = paused;
         emit BurnPausedSet(asset, paused);
     }
 
     function setBackendSigner(address newSigner) external onlyAdmin {
         if (newSigner == address(0)) revert ZeroAddress();
+        if (newSigner == backendSigner) return;
         emit BackendSignerUpdated(backendSigner, newSigner);
         backendSigner = newSigner;
+    }
+
+    /**
+     * @notice Set the pauser role. Typically the FypherCircuitBreaker
+     *         address so its trip flow can pause burn intake on a
+     *         watchdog signal. FYP-24 patch.
+     */
+    function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser.
+        if (newPauser == address(0)) revert ZeroAddress();
+        if (newPauser == pauserRole) return;
+        emit PauserRoleUpdated(pauserRole, newPauser);
+        pauserRole = newPauser;
     }
 
     // ── View ──
@@ -348,13 +468,58 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
         return _userTickets[user].length;
     }
 
+    /**
+     * @notice Paginated view of a user's ticket history.
+     * @dev FYP-50 patch. {ticketsOf} returns the entire array, which
+     *      can exceed RPC response limits for active retail users.
+     *      This pagination view lets the frontend / indexer fetch
+     *      ticket history in fixed-size slices. The caller-supplied
+     *      `offset` and `limit` bound iteration on-chain; values
+     *      past the array end yield an empty slice rather than a
+     *      revert so dashboards do not need a pre-flight length
+     *      check.
+     */
+    function ticketsOfPage(address user, uint256 offset, uint256 limit)
+        external view returns (uint256[] memory page)
+    {
+        uint256[] storage all = _userTickets[user];
+        uint256 total = all.length;
+        if (offset >= total) return new uint256[](0);
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        page = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; ++i) {
+            page[i - offset] = all[i];
+        }
+    }
+
     function isNonceUsed(address user, uint256 nonce) external view returns (bool) {
         return _usedNonces[user][nonce];
     }
 
+    /**
+     * @notice EIP-712 struct hash for a BurnQuote — the inner hash that
+     *         is wrapped by the domain separator inside {digest}.
+     *
+     * @dev FYP-07 patch. The previous hash was a plain
+     *      `keccak256(abi.encode(quote.fields))` without any
+     *      contract / chainId binding, so the same signature could be
+     *      replayed across:
+     *      (a) sibling chains where this contract is also deployed
+     *          under the same backendSigner,
+     *      (b) any future redeployment / proxy reset on the same
+     *          chain,
+     *      (c) potentially against FyusdEpochSettlement /
+     *          FyusdEpochRedemption if their pre-patch field layouts
+     *          collided.
+     *      Including BURN_TYPEHASH gives the signature an action
+     *      discriminator; wrapping it in {_domainSeparatorV4} inside
+     *      {digest} closes the chain/contract leg.
+     */
     function hashQuote(BurnQuote calldata quote) public pure returns (bytes32) {
         return keccak256(
             abi.encode(
+                BURN_TYPEHASH,
                 quote.user,
                 quote.collateralAsset,
                 quote.rusdAmount,
@@ -365,11 +530,46 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
         );
     }
 
+    /**
+     * @notice The full EIP-712 digest that {backendSigner} must produce
+     *         (and that {_verifyQuote} authenticates against). Backend
+     *         signing code should switch from the legacy
+     *         `personal_sign(hashQuote)` to signing this exact digest.
+     */
+    function digest(BurnQuote calldata quote) external view returns (bytes32) {
+        return _digestFromStruct(hashQuote(quote));
+    }
+
+    /// @notice Live EIP-712 domain separator, recomputed per call so
+    ///         the chainId always reflects the current execution
+    ///         context.
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
+    }
+
     // ── Internal ──
 
     function _verifyQuote(BurnQuote calldata quote, bytes calldata signature) internal view {
-        bytes32 ethSignedHash = hashQuote(quote).toEthSignedMessageHash();
-        address recovered = ethSignedHash.recover(signature);
+        bytes32 d = _digestFromStruct(hashQuote(quote));
+        address recovered = d.recover(signature);
         if (recovered != backendSigner) revert InvalidSignature();
+    }
+
+    function _domainSeparatorV4() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
+    function _digestFromStruct(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(hex"19_01", _domainSeparatorV4(), structHash)
+        );
     }
 }

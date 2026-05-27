@@ -63,40 +63,53 @@ async function signMintOrder(signer, mintingAddress, order) {
   return signer.signTypedData(domain, ORDER_TYPES, { ...order, orderType: ORDER_TYPE.MINT });
 }
 
-// EIP-191 personal_sign helper for FypherBurnQueue + FyusdEpochSettlement.
-async function signBurnQuote(signer, quote) {
-  const orderHash = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "address", "uint256", "uint256", "uint256", "uint256"],
-      [
-        quote.user,
-        quote.collateralAsset,
-        quote.rusdAmount,
-        quote.collateralAmount,
-        quote.nonce,
-        quote.expiry,
+// EIP-712 signing helpers post-FYP-07. Both helpers now require the
+// verifying contract address so the domain separator binds correctly.
+async function signBurnQuote(signer, quote, queueAddress) {
+  const { chainId } = await ethers.provider.getNetwork();
+  return signer.signTypedData(
+    {
+      name: "FypherBurnQueue",
+      version: "1",
+      chainId,
+      verifyingContract: queueAddress,
+    },
+    {
+      BurnQuote: [
+        { name: "user", type: "address" },
+        { name: "collateralAsset", type: "address" },
+        { name: "rusdAmount", type: "uint256" },
+        { name: "collateralAmount", type: "uint256" },
+        { name: "nonce", type: "uint256" },
+        { name: "expiry", type: "uint256" },
       ],
-    ),
+    },
+    quote,
   );
-  return signer.signMessage(ethers.getBytes(orderHash));
 }
 
-async function signDepositQuote(signer, quote) {
-  const orderHash = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256", "address", "uint256", "uint256", "uint256", "uint256"],
-      [
-        quote.user,
-        quote.epochId,
-        quote.collateralAsset,
-        quote.collateralAmount,
-        quote.fyusdAmount,
-        quote.nonce,
-        quote.expiry,
+async function signDepositQuote(signer, quote, epochAddress) {
+  const { chainId } = await ethers.provider.getNetwork();
+  return signer.signTypedData(
+    {
+      name: "FyusdEpochSettlement",
+      version: "1",
+      chainId,
+      verifyingContract: epochAddress,
+    },
+    {
+      DepositQuote: [
+        { name: "user", type: "address" },
+        { name: "epochId", type: "uint256" },
+        { name: "collateralAsset", type: "address" },
+        { name: "collateralAmount", type: "uint256" },
+        { name: "fyusdAmount", type: "uint256" },
+        { name: "nonce", type: "uint256" },
+        { name: "expiry", type: "uint256" },
       ],
-    ),
+    },
+    quote,
   );
-  return signer.signMessage(ethers.getBytes(orderHash));
 }
 
 // ── Fixture helpers ──
@@ -245,7 +258,7 @@ describe("Invariant 1: RUSD totalSupply ≤ collateral backing", () => {
       nonce: 100n,
       expiry: await nowPlus(600),
     };
-    const sig = await signBurnQuote(ctx.backend, quote);
+    const sig = await signBurnQuote(ctx.backend, quote, await ctx.burnQueue.getAddress());
     await (await ctx.burnQueue.connect(ctx.alice).requestBurn(quote, sig)).wait();
     // After burn: RUSD supply = 300 (200 burned), total collateral pool still 500
     // but 200 of that is committed liability inside the burn queue (Alice's ticket).
@@ -357,7 +370,7 @@ describe("Invariant 3: epoch leftover == 0 after all claims", () => {
         nonce,
         expiry: await nowPlus(600),
       };
-      const sig = await signDepositQuote(ctx.backend, q);
+      const sig = await signDepositQuote(ctx.backend, q, await ctx.epoch.getAddress());
       await (await ctx.epoch.connect(user).deposit(q, sig)).wait();
     }
 
@@ -393,7 +406,7 @@ describe("Invariant 3: epoch leftover == 0 after all claims", () => {
         nonce,
         expiry: await nowPlus(600),
       };
-      await (await ctx.epoch.connect(user).deposit(q, await signDepositQuote(ctx.backend, q))).wait();
+      await (await ctx.epoch.connect(user).deposit(q, await signDepositQuote(ctx.backend, q, await ctx.epoch.getAddress()))).wait();
     }
     await increaseTime(TEN_HOURS + 1n);
     await (await ctx.epoch.lockEpoch(1n)).wait();
@@ -482,7 +495,7 @@ describe("Invariant 5: 7-day burn delay is never bypassed", () => {
       nonce: 1n,
       expiry: await nowPlus(600),
     };
-    await (await ctx.burnQueue.connect(ctx.alice).requestBurn(quote, await signBurnQuote(ctx.backend, quote))).wait();
+    await (await ctx.burnQueue.connect(ctx.alice).requestBurn(quote, await signBurnQuote(ctx.backend, quote, await ctx.burnQueue.getAddress()))).wait();
 
     // Move to (requestedAt + 7d - 2s). claim should still revert.
     await increaseTime(SEVEN_DAYS - 2n);

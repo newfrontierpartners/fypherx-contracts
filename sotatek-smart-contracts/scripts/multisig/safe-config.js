@@ -8,7 +8,7 @@
  * Per ADR-010, Phase 1 ships across three networks. ADR-007 §"Signer
  * sets" defines the threshold per network:
  *
- *   - BSC Testnet (chainId 97):   2-of-3 (testnet ops)
+ *   - HOODI       (chainId 560048):    2-of-3 (testnet ops)
  *   - Sepolia      (chainId 11155111): 2-of-3 (pre-prod)
  *   - Mainnet      (chainId 1):   3-of-5 (production)
  *
@@ -18,9 +18,10 @@
  */
 
 const SAFE_DEPLOYMENTS_V1_3_0 = {
-  // BSC Testnet — verified at https://app.safe.global/welcome?chain=bsc
-  97: {
-    name: "BSC Testnet",
+  // Ethereum HOODI — Safe v1.3.0 canonical CREATE2 addresses are the
+  // same as Sepolia/Mainnet because the proxy factory uses a fixed salt.
+  560048: {
+    name: "Ethereum HOODI",
     proxyFactory: "0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2",
     singleton:    "0x3E5c63644E683549055b9Be8653de26E0B4CD36E", // GnosisSafeL2
     fallbackHandler: "0xf48f2B2d2a534e402487b3ee7C18c33Aec0Fe5e4",

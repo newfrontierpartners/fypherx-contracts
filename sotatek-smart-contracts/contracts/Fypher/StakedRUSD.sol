@@ -7,6 +7,7 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUp
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "../libraries/PoolMath.sol";
@@ -15,11 +16,38 @@ import "./RUSDSilo.sol";
 /**
  * @title StakedRUSD (sRUSD)
  * @notice Primary retail staking vault for RUSD using ERC-4626.
- *         APR-based reward distribution with linear 8-hour vesting.
- *         Cooldown mechanism: assets held in RUSDSilo during cooldown period.
+ *         APR-based reward distribution with an 8-hour linear release
+ *         window (see FYP-21 note below). Cooldown mechanism: assets
+ *         held in RUSDSilo during the cooldown period.
  *
  * @dev Upgradeable (TransparentProxy). Deployed at: 0x2c048e01ebf957f7Ab66C3a09E85Ae31db7803D6
  *      Implementation: 0xd9c9f728dc7d5e81e2df406b82fe2540f2d484f3
+ *
+ * @dev <b>FYP-21 — reward terminology decision</b>. CertiK flagged
+ *      that the "vesting" terminology used by {vestingAmount},
+ *      {_unvestedAmount}, and {VESTING_PERIOD} misrepresents how
+ *      rewards are distributed. The intended model is the Ethena
+ *      sUSDe pattern — rewards STREAM to whichever addresses hold
+ *      sRUSD shares during the 8-hour release window, including
+ *      depositors who joined after {transferInRewards} was called.
+ *      They are NOT "vested" to a fixed cohort of pre-existing
+ *      stakers.
+ *
+ *      The identifiers are intentionally retained (rather than
+ *      renamed to {unreleasedRewards} / {_unreleasedAmount} /
+ *      {REWARD_RELEASE_PERIOD}) for two reasons:
+ *      (a) TransparentProxy storage layout safety — the contract
+ *          is live on a testnet proxy and a slot-name change risks
+ *          accidental layout reordering on the next compile;
+ *      (b) backend Web3j bindings + indexers key off the current
+ *          names. Renaming would require a coordinated cutover with
+ *          fypherx-gateway / fypherx-risk-service.
+ *
+ *      The semantic clarification lives in this docstring and in
+ *      the per-function NatSpec on {totalAssets} and
+ *      {transferInRewards} below. Integrators must read those notes
+ *      to understand the streaming semantics — the names alone are
+ *      legacy.
  */
 contract StakedRUSD is
     Initializable,
@@ -34,6 +62,14 @@ contract StakedRUSD is
     // ── Constants ──
     uint256 public constant VESTING_PERIOD = 8 hours;
     uint256 public constant SETTING_MANAGER_TIMELOCK = 2 days;
+    /// @notice Floor for the cooldown duration when SettingManagement
+    ///         returns 0 for `"cooldownDuration"`. Without this floor
+    ///         (FYP-37 patch), an unset config silently turned the
+    ///         vault into a no-cooldown vault — staking became
+    ///         instantly exit-able the moment a user called
+    ///         {cooldownAssets}. 7 days matches the README's stated
+    ///         retail-staking cooldown.
+    uint256 public constant DEFAULT_COOLDOWN = 7 days;
     // April-audit L-2 patch. The legacy `MIN_SHARES = 1` constant was
     // declared here but never read by any function. The intended
     // first-depositor inflation guard belongs in OZ ERC4626's
@@ -76,6 +112,8 @@ contract StakedRUSD is
     event SettingManagerUpdated(address indexed newManager);
     event SettingManagerProposed(address indexed newManager, uint256 eta);
     event SettingManagerProposalCancelled(address indexed cancelledManager);
+    /// @notice FYP-60 patch.
+    event RemainingRewardsUpdated(uint256 amount);
 
     // ── Errors ──
     error NotAdmin();
@@ -89,6 +127,14 @@ contract StakedRUSD is
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error AdminMismatch(address admin_);
+    /// @notice FYP-06: the immediate-exit ERC-4626 path is disabled.
+    ///         Users must exit via {cooldownAssets} / {cooldownShares}
+    ///         and {unstake} (or {earlyUnstake} with a fee).
+    error CooldownRequired();
+    /// @notice FYP-30 / FYP-43. The user's cooldown is either ready to
+    ///         unstake (call {unstake} instead of paying the early-
+    ///         exit fee) or has not been started.
+    error ExistingCooldownReady();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -159,7 +205,19 @@ contract StakedRUSD is
      * @notice Total assets backing the vault for share-pricing purposes.
      *         Returns `balance(asset) - _unvestedAmount()` so the still-
      *         locked portion of a recently-distributed reward is excluded
-     *         from the share price during its 8-hour linear vesting.
+     *         from the share price during its 8-hour linear release.
+     *
+     * @dev <b>Reward semantics</b> (FYP-21 clarification). Rewards
+     *      funded via {transferInRewards} are STREAMED to whichever
+     *      addresses hold sRUSD shares during the release window —
+     *      they are NOT vested to a fixed set of pre-existing
+     *      stakers. New depositors during the window legitimately
+     *      participate in the unreleased portion as it linearly
+     *      decays. The "vestingAmount" / "_unvestedAmount" /
+     *      "VESTING_PERIOD" identifiers are retained for backend
+     *      Web3j-binding stability, but their semantics are
+     *      "unreleased rewards being streamed", not "vested cohort
+     *      attribution".
      *
      * @dev April-audit C-1 patch. The previous shape was
      *      `balance + calculateVestedAmount(...)` which (a) double-counted
@@ -221,28 +279,84 @@ contract StakedRUSD is
         return shares;
     }
 
-    function withdraw(uint256 assets, address receiver, address owner_)
+    /**
+     * @notice ERC-4626 mint() override. Mirrors {deposit} guards.
+     * @dev FYP-02 patch. The previous implementation inherited
+     *      ERC4626.mint unchanged, which let callers enter the vault
+     *      while bypassing {nonReentrant}, {whenNotPaused},
+     *      {notRestricted(receiver)}, and {userStakedAmount}
+     *      accounting. The fix is a thin pass-through that applies
+     *      the same modifier set as deposit() and posts the asset-
+     *      equivalent of the minted shares into the principal
+     *      counter.
+     */
+    function mint(uint256 shares, address receiver)
         public
         override
         nonReentrant
         whenNotPaused
+        notRestricted(receiver)
         returns (uint256)
     {
-        uint256 ret = super.withdraw(assets, receiver, owner_);
-        _debitUserStaked(owner_, assets);
-        return ret;
+        if (shares == 0) revert ZeroAmount();
+        uint256 assets = super.mint(shares, receiver);
+        userStakedAmount[receiver] += assets;
+        return assets;
     }
 
-    function redeem(uint256 shares, address receiver, address owner_)
-        public
-        override
-        nonReentrant
-        whenNotPaused
-        returns (uint256)
-    {
-        uint256 assets = super.redeem(shares, receiver, owner_);
-        _debitUserStaked(owner_, assets);
-        return assets;
+    /**
+     * @notice The immediate ERC-4626 exit is permanently disabled — all
+     *         exits must go through the cooldown silo.
+     *
+     * @dev FYP-06 patch. The previous shape simply forwarded to
+     *      `super.withdraw`, which let users skip the cooldown
+     *      entirely. The cooldown flow uses the *internal*
+     *      `_withdraw` (see {cooldownAssets}) so this override does
+     *      not affect it.
+     */
+    function withdraw(uint256, address, address) public pure override returns (uint256) {
+        revert CooldownRequired();
+    }
+
+    /// @notice Mirror of {withdraw} for the redeem entry-point. See above.
+    function redeem(uint256, address, address) public pure override returns (uint256) {
+        revert CooldownRequired();
+    }
+
+    /// @notice ERC-4626 advertisement that no immediate withdraw is
+    ///         available; integrators that respect maxWithdraw should
+    ///         skip this vault for synchronous exits and route through
+    ///         the cooldown flow instead.
+    function maxWithdraw(address) public pure override returns (uint256) {
+        return 0;
+    }
+
+    /// @notice ERC-4626 advertisement that no immediate redeem is
+    ///         available. See {maxWithdraw}.
+    function maxRedeem(address) public pure override returns (uint256) {
+        return 0;
+    }
+
+    /// @notice ERC-4626 advertisement that no synchronous withdraw is
+    ///         available. Mirrors {maxWithdraw} so integrators that
+    ///         consult the preview surface do not receive a misleading
+    ///         non-zero conversion. The cooldown flow uses the internal
+    ///         {_convertToShares} directly so this override does not
+    ///         affect it.
+    /// @dev FYP-06 lingering. CertiK noted the original FYP-06 patch
+    ///      left {previewWithdraw}/{previewRedeem} returning real
+    ///      conversion numbers (because {cooldownAssets}/{cooldownShares}
+    ///      and the legacy {_update} transfer hook re-used them). The
+    ///      internal callers have been migrated to {_convertToShares}/
+    ///      {_convertToAssets}, so the public preview surface can now
+    ///      return 0 in lockstep with {maxWithdraw}/{maxRedeem}.
+    function previewWithdraw(uint256) public pure override returns (uint256) {
+        return 0;
+    }
+
+    /// @notice See {previewWithdraw}.
+    function previewRedeem(uint256) public pure override returns (uint256) {
+        return 0;
     }
 
     /**
@@ -284,7 +398,12 @@ contract StakedRUSD is
      */
     function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
-        uint256 shares = previewWithdraw(assets);
+        // FYP-06 lingering. Bypass {previewWithdraw} (now returns 0)
+        // and use the OZ internal conversion directly. Math.Rounding.Ceil
+        // matches the original {previewWithdraw} semantics: round shares
+        // burned UP so the vault never short-withdraws against the asset
+        // amount it just owes the user.
+        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
         _withdraw(msg.sender, address(silo), msg.sender, assets, shares);
         _debitUserStaked(msg.sender, assets);
 
@@ -293,7 +412,10 @@ contract StakedRUSD is
 
     function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
-        uint256 assets = previewRedeem(shares);
+        // FYP-06 lingering. See {cooldownAssets}. Math.Rounding.Floor
+        // matches the original {previewRedeem} semantics: round assets
+        // returned DOWN so the vault never over-pays out per share.
+        uint256 assets = _convertToAssets(shares, Math.Rounding.Floor);
         _withdraw(msg.sender, address(silo), msg.sender, assets, shares);
         _debitUserStaked(msg.sender, assets);
 
@@ -307,10 +429,21 @@ contract StakedRUSD is
      *         end, `now + cooldownDuration`).
      */
     function _accrueCooldown(address user, uint256 assets) internal {
+        UserCooldown storage cd = cooldowns[user];
+        // FYP-43 patch. If the user has an already-claimable cooldown
+        // sitting in the silo, refuse to merge a new amount on top —
+        // doing so would push the existing balance's release date out
+        // to the new cooldownEnd, re-locking principal the user could
+        // already withdraw via {unstake}. The user must claim the
+        // ready cooldown first, then start a fresh one.
+        if (cd.underlyingAmount > 0 && block.timestamp >= cd.cooldownEnd) {
+            revert ExistingCooldownReady();
+        }
+
         uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
+        if (cooldownDuration == 0) cooldownDuration = DEFAULT_COOLDOWN;  // FYP-37
         uint256 newEnd = block.timestamp + cooldownDuration;
 
-        UserCooldown storage cd = cooldowns[user];
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
         // uint152 holds ~5.7e45 — comfortably above any realistic 18-decimal
         // stake balance. Defensive cast bound for L-4.
@@ -335,9 +468,27 @@ contract StakedRUSD is
         emit Unstaked(msg.sender, receiver, assets);
     }
 
+    /**
+     * @notice Pay the configured early-unstake fee to skip the
+     *         remaining cooldown wait. Reverts if the cooldown has
+     *         already elapsed (the user should call {unstake} instead
+     *         and keep their full balance — FYP-30 patch).
+     *
+     * @dev FYP-33 patch. The fee receiver must NOT be this vault. If
+     *      it were, the fee would land on `address(this)` and
+     *      immediately appear in {totalAssets} (which reads
+     *      `balanceOf(asset) - _unvestedAmount`), bypassing the
+     *      8-hour streaming release. Operators are expected to
+     *      configure feeReceiver to a treasury / reserve address
+     *      instead.
+     */
     function earlyUnstake(address receiver) external nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
+        if (block.timestamp >= cd.cooldownEnd) revert ExistingCooldownReady();
+
+        address feeReceiver = settingManagement.getFeeReceiver();
+        require(feeReceiver != address(this), "Vault cannot be its own fee receiver");
 
         uint256 assets = cd.underlyingAmount;
         uint256 fee = PoolMath.calculateFee(assets, settingManagement.getFees("earlyUnstakeFee"));
@@ -346,7 +497,7 @@ contract StakedRUSD is
 
         silo.withdraw(receiver, netAssets);
         if (fee > 0) {
-            silo.withdraw(settingManagement.getFeeReceiver(), fee);
+            silo.withdraw(feeReceiver, fee);
         }
 
         emit EarlyUnstaked(msg.sender, receiver, netAssets, fee);
@@ -384,12 +535,16 @@ contract StakedRUSD is
     }
 
     function setCurrentAPY(uint256 newAPR) external onlyAdmin {
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newAPR == currentAPRRate) return;
         currentAPRRate = newAPR;
         emit APRUpdated(newAPR);
     }
 
     function setRemainingRewards(uint256 amount) external onlyAdmin {
+        if (amount == remainingRewards) return;
         remainingRewards = amount;
+        emit RemainingRewardsUpdated(amount);  // FYP-60
     }
 
     // ── Admin ──
@@ -479,11 +634,66 @@ contract StakedRUSD is
     }
 
     // ── Internal overrides ──
+    /**
+     * @dev FYP-03 patch + FYP-03 lingering patch (May 2026).
+     *
+     *      <p>Original FYP-03 problem: the previous body was a plain
+     *      pass-through to the parent ERC20/Pausable _update. An
+     *      unrestricted holder could route freshly-deposited sRUSD
+     *      shares to a restricted address by plain ERC-20 transfer,
+     *      and `userStakedAmount` stayed attached to the original
+     *      depositor — off-chain dashboards reported the stake on the
+     *      wrong account. The first patch added the `notRestricted(to)`
+     *      gate and moved a NAV-equivalent `previewRedeem(value)`
+     *      worth of principal from sender to recipient.
+     *
+     *      <p>Why this second revision (FYP-03 lingering, CertiK May
+     *      2026): NAV-equivalent move included accrued rewards as
+     *      "principal" on the recipient side, most visibly when a
+     *      user transferred to themselves and watched their
+     *      `userStakedAmount` jump from `deposit principal` to
+     *      `deposit principal + accrued rewards`. The new shape uses
+     *      share-fraction math:
+     *
+     *        principalMoved = userStakedAmount[from] × value
+     *                         / balanceOf(from)
+     *
+     *      computed against the PRE-transfer balance (super._update
+     *      runs after our hook). Properties:
+     *
+     *      - Self-transfer of `balanceOf(from)` leaves
+     *        userStakedAmount[from] unchanged (proportionate split
+     *        of all principal returns to the same account).
+     *      - Partial transfer splits principal proportionally with
+     *        the shares moved.
+     *      - principalMoved is bounded by userStakedAmount[from]
+     *        because value ≤ balanceOf(from); no over-debit.
+     *      - Reward accrual is reflected purely via share-price
+     *        growth (totalAssets), never via the principal counter.
+     *
+     *      Mint and burn bypass both branches — mint accounting is
+     *      done in {deposit}/{mint}, burn accounting is done in
+     *      {cooldownAssets}/{cooldownShares} / {_debitUserStaked}.
+     */
     function _update(
         address from,
         address to,
         uint256 value
     ) internal override(ERC20Upgradeable, ERC20PausableUpgradeable) {
+        if (from != address(0) && to != address(0)) {
+            if (settingManagement.hasRole(keccak256("FULL_RESTRICTED_STAKER_ROLE"), to))
+                revert RestrictedStaker(to);
+            if (settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), to))
+                revert RestrictedStaker(to);
+
+            uint256 fromBalance = balanceOf(from);
+            uint256 principalMoved;
+            if (fromBalance > 0) {
+                principalMoved = (userStakedAmount[from] * value) / fromBalance;
+            }
+            _debitUserStaked(from, principalMoved);
+            userStakedAmount[to] += principalMoved;
+        }
         super._update(from, to, value);
     }
 

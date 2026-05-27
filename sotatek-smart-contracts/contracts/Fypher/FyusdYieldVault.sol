@@ -7,6 +7,7 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUp
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "./IConcreteAdapter.sol";
@@ -22,6 +23,15 @@ interface IFYUSDPermit {
         bytes32 r,
         bytes32 s
     ) external;
+}
+
+/// @dev Optional extension on {IConcreteAdapter}. ConcreteAdapterV1
+///      implements this; legacy mock adapters may not. Only consumed by
+///      {sweepAdapterConcreteShares} which is admin-gated, so a mock
+///      that lacks the entry-point simply leaves the sweep call
+///      reverting — acceptable for test scaffolds.
+interface IConcreteAdapterSweepable {
+    function sweepConcreteShares(address to) external returns (uint256 amount);
 }
 
 /**
@@ -100,9 +110,15 @@ contract FyusdYieldVault is
     error ZeroAddress();
     error AdapterAssetMismatch(address vault, address adapter);
     error AdapterReturnedShort(uint256 expected, uint256 received);
+    error AdapterStillHoldsShares(uint256 shares);
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error AdminMismatch(address admin_);
+    /// @notice FYP-43: user has a ready-to-claim cooldown sitting in
+    ///         the silo. Call {unstake} first, then start a fresh
+    ///         cooldown — otherwise the existing balance would be
+    ///         re-locked under the new cooldownEnd.
+    error ExistingCooldownReady();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -154,6 +170,16 @@ contract FyusdYieldVault is
     ///         adapter currently controls on our behalf. The vault itself
     ///         does NOT hold active FYUSD; cooldown balances are escrowed
     ///         in the silo and excluded by construction.
+    ///
+    /// @dev <b>FYP-57</b>. Any FYUSD transferred DIRECTLY to this
+    ///      contract (by mistake or by a third party) is NOT
+    ///      reflected in {totalAssets} — by design. Deposits must
+    ///      go through {deposit} / {mint} so the adapter is funded
+    ///      and the per-share NAV stays consistent. Direct transfers
+    ///      become stuck (the vault's {rescueTokens} explicitly
+    ///      rejects rescuing the underlying asset). Frontend /
+    ///      integrators MUST route every FYUSD inflow through the
+    ///      ERC-4626 entry points.
     function totalAssets() public view override returns (uint256) {
         return adapter.totalAssets();
     }
@@ -165,6 +191,15 @@ contract FyusdYieldVault is
      *      adapter.shareOf(vault) start from 0 and grow in lockstep with
      *      the same NAV expansion).
      */
+    /**
+     * @dev FYP-55 patch. Resets the adapter allowance back to 0 after
+     *      the deposit call so any unconsumed remainder cannot be
+     *      pulled by the adapter later. With the current
+     *      ConcreteAdapterV1 this is belt-and-braces — that adapter
+     *      consumes the full approved amount synchronously — but the
+     *      reset insulates the vault from future adapter swaps that
+     *      may not.
+     */
     function _deposit(
         address caller,
         address receiver,
@@ -175,6 +210,7 @@ contract FyusdYieldVault is
         fyusd.safeTransferFrom(caller, address(this), assets);
         fyusd.forceApprove(address(adapter), assets);
         adapter.deposit(assets);
+        fyusd.forceApprove(address(adapter), 0);
         _mint(receiver, shares);
 
         emit Deposit(caller, receiver, assets, shares);
@@ -195,6 +231,30 @@ contract FyusdYieldVault is
         uint256 /* shares */
     ) internal pure override {
         revert("vFYUSD: use cooldown flow");
+    }
+
+    /// @notice ERC-4626 advertisement that synchronous exits are
+    ///         disabled — the cooldown flow is the only exit path.
+    /// @dev FYP-34 patch. Without these overrides, ERC-4626
+    ///      integrators that consult {maxWithdraw} / {maxRedeem}
+    ///      get a non-zero value (computed from
+    ///      `_convertToAssets(balanceOf(owner))`) and assume
+    ///      a synchronous exit is available; the actual
+    ///      {_withdraw} call then reverts with
+    ///      "vFYUSD: use cooldown flow". Returning 0 here matches
+    ///      the staked-vault pattern and removes the
+    ///      misleading-signal surface.
+    function maxWithdraw(address) public pure override returns (uint256) {
+        return 0;
+    }
+    function maxRedeem(address) public pure override returns (uint256) {
+        return 0;
+    }
+    function previewWithdraw(uint256) public pure override returns (uint256) {
+        return 0;
+    }
+    function previewRedeem(uint256) public pure override returns (uint256) {
+        return 0;
     }
 
     function deposit(uint256 assets, address receiver)
@@ -238,6 +298,14 @@ contract FyusdYieldVault is
     }
 
     // ── Cooldown ──
+    /// @dev FYP-34 patch. Internal conversion via OZ's
+    ///      {_convertToShares} / {_convertToAssets} so that the
+    ///      public {previewWithdraw} / {previewRedeem} can return 0
+    ///      (matching {maxWithdraw} / {maxRedeem}) without breaking
+    ///      the cooldown math. Rounding modes mirror the OZ
+    ///      defaults the previous {previewWithdraw} / {previewRedeem}
+    ///      path used (Ceil for shares burned, Floor for assets
+    ///      delivered).
     function cooldownAssets(uint256 assets)
         external
         override
@@ -245,7 +313,7 @@ contract FyusdYieldVault is
         whenNotPaused
     {
         if (assets == 0) revert ZeroAmount();
-        uint256 shares = previewWithdraw(assets);
+        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
@@ -256,27 +324,36 @@ contract FyusdYieldVault is
         whenNotPaused
     {
         if (shares == 0) revert ZeroAmount();
-        uint256 assets = previewRedeem(shares);
+        uint256 assets = _convertToAssets(shares, Math.Rounding.Floor);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
     /**
-     * @dev Burn `shares` from `user`, withdraw the equivalent FYUSD from
-     *      the adapter, transfer it to the silo, and add `assets` to the
-     *      user's outstanding cooldown bucket.
+     * @dev Burn `shares` from `user`, withdraw the requested FYUSD
+     *      amount from the adapter, transfer it to the silo, and add
+     *      it to the user's outstanding cooldown bucket.
      *
-     *      Vault shares track adapter shares 1:1 (see {totalAssets}
-     *      docstring). We therefore call `adapter.withdraw(shares)` —
-     *      not `adapter.withdraw(assets)` — so the share-burn stays in
-     *      lockstep with the vToken burn.
+     * @dev FYP-41 patch. We now call `adapter.withdraw(assets)`
+     *      instead of `adapter.withdraw(shares)`. The previous shape
+     *      assumed vault-shares and adapter-shares stayed 1:1, but
+     *      the OZ ERC4626 inflation-protection math (`+1` / `+offset`
+     *      correction) does not guarantee this; the two share
+     *      counters could drift by rounding, and passing the vault-
+     *      share count to an adapter that interprets it as adapter-
+     *      shares burned the wrong number of Concrete shares,
+     *      enabling the share-pricing-drain class of bug CertiK's
+     *      FYP-41 PoC reproduced. The adapter is now asset-based
+     *      (it computes the share burn count internally,
+     *      ceil-rounded) so the vault stays the single source of
+     *      share accounting.
      *
-     *      The adapter MUST return at least `assets` FYUSD (its own
-     *      `previewRedeem`-equivalent matches ours). We verify defensively;
-     *      a short return signals an adapter accounting bug or NAV race.
+     *      The adapter MUST return at least `assets` FYUSD. We
+     *      verify defensively; a short return signals an adapter
+     *      accounting bug or NAV race.
      */
     function _exitToCooldown(address user, uint256 assets, uint256 shares) internal {
         _burn(user, shares);
-        uint256 received = adapter.withdraw(shares);
+        uint256 received = adapter.withdraw(assets);
         if (received < assets) revert AdapterReturnedShort(assets, received);
 
         IERC20(asset()).safeTransfer(address(silo), received);
@@ -284,12 +361,20 @@ contract FyusdYieldVault is
     }
 
     function _accrueCooldown(address user, uint256 assets) internal {
+        UserCooldown storage cd = cooldowns[user];
+        // FYP-43 patch. See {StakedRUSD._accrueCooldown} — reject a
+        // new cooldown on top of an already-claimable balance so the
+        // user does not accidentally re-lock funds that were ready
+        // for {unstake}.
+        if (cd.underlyingAmount > 0 && block.timestamp >= cd.cooldownEnd) {
+            revert ExistingCooldownReady();
+        }
+
         uint256 cooldownDuration = settingManagement.getPoolConfigs(COOLDOWN_CONFIG_KEY);
         if (cooldownDuration == 0) cooldownDuration = DEFAULT_COOLDOWN;
 
         uint256 newEnd = block.timestamp + cooldownDuration;
 
-        UserCooldown storage cd = cooldowns[user];
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
         require(newAmount <= type(uint152).max, "Cooldown overflow");
         cd.underlyingAmount = uint152(newAmount);
@@ -313,21 +398,52 @@ contract FyusdYieldVault is
     }
 
     // ── Admin ──
+    /**
+     * @dev FYP-09 patch. The previous shape blindly rebound the
+     *      adapter, orphaning every asset still parked in the old
+     *      adapter (since totalAssets() reads from the new, empty one
+     *      and adapter.withdraw on the new adapter has no record of
+     *      our shares). The NatSpec referenced an emergencyMigrate
+     *      step that never existed.
+     *
+     *      We now require `oldAdapter.shareOf(this) == 0` before any
+     *      rebind — operators must first drain the existing adapter
+     *      (e.g. via the standard cooldown flow, an admin-staged
+     *      `withdrawAll` helper, or a future emergencyMigrate hook
+     *      added in tandem) so the share-state invariant
+     *      `totalSupply == adapter.shareOf(vault)` is never broken
+     *      across the rebind.
+     */
     function setAdapter(IConcreteAdapter newAdapter) external onlyAdmin {
         if (address(newAdapter) == address(0)) revert ZeroAddress();
         if (newAdapter.asset() != asset()) {
             revert AdapterAssetMismatch(asset(), newAdapter.asset());
         }
-        // Migration to a v2 adapter is intentionally NOT automated — admin
-        // must coordinate the asset move via an emergencyMigrate step
-        // before flipping the binding. This keeps the share-state
-        // invariant (totalSupply == adapter.shareOf(vault)) under the
-        // operator's control.
+        if (adapter.shareOf(address(this)) != 0) {
+            revert AdapterStillHoldsShares(adapter.shareOf(address(this)));
+        }
         emit AdapterUpdated(address(adapter), address(newAdapter));
         adapter = newAdapter;
     }
 
+    /**
+     * @notice Admin recovery hatch for Concrete shares that landed on
+     *         the adapter outside of the deposit path. Forwards the
+     *         excess to {to}. Admin-only — we proxy the call through
+     *         the vault because ConcreteAdapterV1 binds its
+     *         {sweepConcreteShares} entry-point to msg.sender == this
+     *         vault.
+     */
+    function sweepAdapterConcreteShares(address to) external onlyAdmin returns (uint256 swept) {
+        if (to == address(0)) revert ZeroAddress();
+        return IConcreteAdapterSweepable(address(adapter)).sweepConcreteShares(to);
+    }
+
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser.
+        if (newPauser == address(0)) revert ZeroAddress();
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;
     }

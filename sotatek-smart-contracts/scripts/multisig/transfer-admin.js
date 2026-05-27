@@ -8,7 +8,7 @@
  * NOT broken if the multisig delays.
  *
  * Usage:
- *   npx hardhat run scripts/multisig/transfer-admin.js --network bscTestnet
+ *   npx hardhat run scripts/multisig/transfer-admin.js --network hoodi
  */
 const { ethers, network } = require("hardhat");
 const addresses = require("../lib/addresses");

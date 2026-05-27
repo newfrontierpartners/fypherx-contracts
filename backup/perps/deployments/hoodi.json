@@ -1,0 +1,28 @@
+{
+  "network": "hoodi",
+  "chainId": 560048,
+  "deployer": "0x31B60b11533c97b5ED7b1B650D31855F3754Acb4",
+  "initialRelayer": "0x31B60b11533c97b5ED7b1B650D31855F3754Acb4",
+  "initialSigner": "0x31B60b11533c97b5ED7b1B650D31855F3754Acb4",
+  "initialOperator": "0x31B60b11533c97b5ED7b1B650D31855F3754Acb4",
+  "collateralToken": "0x16b0aB78B9f37747a9C088C89E74CB4eC67BB259",
+  "oracleRouterAddress": "0xD204f5C71FE2fd962811AaD2717089a0B220597a",
+  "settlementAddress": "0x6d9f036897777CAF0C252fA60F6FEA7210CD4731",
+  "insuranceFundVaultAddress": "0xA1fe64082772A9C62D8449061E5f9cC992345b1c",
+  "clearinghouseAddress": "0x93B3bE7dDC7E9fDCC6D51C0516448A1381777CAc",
+  "oracles": {
+    "BTC-PERP": {
+      "feed": "0x4f525594695B550c3AcBD6642541b788EDe634c3",
+      "decimals": 8
+    },
+    "ETH-PERP": {
+      "feed": "0x2eC4e4057746e49BD52b658b53713F6bB8572d06",
+      "decimals": 8
+    }
+  },
+  "marketsConfigured": [
+    "BTC-PERP",
+    "ETH-PERP"
+  ],
+  "deployedAt": "2026-05-17T18:04:25.722Z"
+}

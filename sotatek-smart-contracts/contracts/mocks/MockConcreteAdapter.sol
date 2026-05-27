@@ -3,6 +3,7 @@ pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../Fypher/IConcreteAdapter.sol";
 
 /**
@@ -34,6 +35,13 @@ contract MockConcreteAdapter is IConcreteAdapter {
     IERC20 public immutable fyusd;
     /// @notice Annualised yield rate in basis points. 400 = 4% APY.
     uint256 public immutable apyBps;
+    /// @notice Optional single-tenant binding. When non-zero, only this
+    ///         address may call {deposit}/{withdraw}, mirroring the
+    ///         post-FYP-01 ConcreteAdapterV1 access model. Setting it to
+    ///         zero in the constructor keeps the legacy free-for-all
+    ///         behaviour for ad-hoc unit tests that exercise the adapter
+    ///         in isolation.
+    address public immutable vault;
 
     /// @notice Total FYUSD principal deposited (excluding simulated yield).
     uint256 public principal;
@@ -55,11 +63,30 @@ contract MockConcreteAdapter is IConcreteAdapter {
     error InsufficientLiquidity(uint256 have, uint256 want);
     error ZeroAmount();
     error InsufficientShares(uint256 have, uint256 want);
+    error NotVault();
+    /// @notice FYP-41: caller asked for more underlying than the
+    ///         adapter currently tracks.
+    error InsufficientAssets(uint256 requested, uint256 available);
 
-    constructor(IERC20 _fyusd, uint256 _apyBps) {
+    /// @notice Pass {_vault} non-zero to enforce the same single-tenant
+    ///         access model as ConcreteAdapterV1, which is what
+    ///         production-shape integration tests want. Pass
+    ///         address(0) to keep the legacy free-for-all behaviour
+    ///         for ad-hoc unit tests that exercise the adapter in
+    ///         isolation.
+    constructor(IERC20 _fyusd, uint256 _apyBps, address _vault) {
         fyusd = _fyusd;
         apyBps = _apyBps;
         lastAccrualAt = uint64(block.timestamp);
+        vault = _vault;
+    }
+
+    /// @dev Only the bound vault (if any) may call adapter mutators.
+    ///      When {vault} == address(0) the modifier is a no-op so legacy
+    ///      ad-hoc unit tests keep working.
+    modifier onlyVault() {
+        if (vault != address(0) && msg.sender != vault) revert NotVault();
+        _;
     }
 
     function asset() external view returns (address) {
@@ -81,7 +108,7 @@ contract MockConcreteAdapter is IConcreteAdapter {
         return apyBps;
     }
 
-    function deposit(uint256 fyusdAmount) external returns (uint256 shares) {
+    function deposit(uint256 fyusdAmount) external onlyVault returns (uint256 shares) {
         if (fyusdAmount == 0) revert ZeroAmount();
         _accrue();
         // Share/principal ratio: if no prior holders, 1:1; else preserve
@@ -97,26 +124,47 @@ contract MockConcreteAdapter is IConcreteAdapter {
         emit Deposited(msg.sender, fyusdAmount, shares);
     }
 
-    function withdraw(uint256 shares) external returns (uint256 fyusdAmount) {
-        if (shares == 0) revert ZeroAmount();
-        if (_shares[msg.sender] < shares) revert InsufficientShares(_shares[msg.sender], shares);
+    /// @dev FYP-41 patch. Parameter semantics flipped from "burn this
+    ///      many adapter-shares" to "release this many assets". See
+    ///      {IConcreteAdapter.withdraw} for the cross-impl rationale.
+    function withdraw(uint256 fyusdAmount) external onlyVault returns (uint256) {
+        if (fyusdAmount == 0) revert ZeroAmount();
         _accrue();
-        fyusdAmount = (shares * (principal + accruedYield)) / totalShares;
+        uint256 ta = principal + accruedYield;
+        if (ta == 0 || totalShares == 0) revert InsufficientAssets(fyusdAmount, ta);
+        if (fyusdAmount > ta) revert InsufficientAssets(fyusdAmount, ta);
 
         uint256 bal = fyusd.balanceOf(address(this));
         if (bal < fyusdAmount) revert InsufficientLiquidity(bal, fyusdAmount);
 
+        // Burn just enough adapter-shares (ceil) to back the asset
+        // amount, exactly mirroring ConcreteAdapterV1.
+        uint256 burnShares = Math.ceilDiv(fyusdAmount * totalShares, ta);
+        if (_shares[msg.sender] < burnShares) {
+            revert InsufficientShares(_shares[msg.sender], burnShares);
+        }
+
         // Decrement principal proportionally; remaining (yield portion)
-        // comes out of accruedYield.
-        uint256 principalShare = (shares * principal) / totalShares;
+        // comes out of accruedYield. Use the burn-share ratio so the
+        // split tracks how much of the burned shares was "principal"
+        // versus "yield".
+        uint256 principalShare = (burnShares * principal) / totalShares;
+        if (principalShare > fyusdAmount) principalShare = fyusdAmount;
         uint256 yieldShare = fyusdAmount - principalShare;
         principal -= principalShare;
+        if (yieldShare > accruedYield) {
+            // Defensive: if the ratio split overshoots accruedYield
+            // (possible at exact yield boundaries), clamp to what's
+            // actually accrued.
+            yieldShare = accruedYield;
+        }
         accruedYield -= yieldShare;
-        _shares[msg.sender] -= shares;
-        totalShares -= shares;
+        _shares[msg.sender] -= burnShares;
+        totalShares -= burnShares;
 
         fyusd.safeTransfer(msg.sender, fyusdAmount);
-        emit Withdrawn(msg.sender, shares, fyusdAmount);
+        emit Withdrawn(msg.sender, burnShares, fyusdAmount);
+        return fyusdAmount;
     }
 
     /// @notice Donate FYUSD to the adapter to cover yield obligations.

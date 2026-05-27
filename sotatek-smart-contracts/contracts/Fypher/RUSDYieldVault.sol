@@ -7,6 +7,7 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUp
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "./IConcreteAdapter.sol";
@@ -22,6 +23,14 @@ interface IRUSDPermit {
         bytes32 r,
         bytes32 s
     ) external;
+}
+
+/// @dev Optional extension on {IConcreteAdapter}. ConcreteAdapterV1
+///      implements this; legacy mock adapters may not. See
+///      {FyusdYieldVault} for the same interface — kept duplicated
+///      to avoid cross-contract imports.
+interface IConcreteAdapterSweepable {
+    function sweepConcreteShares(address to) external returns (uint256 amount);
 }
 
 /**
@@ -86,9 +95,12 @@ contract RUSDYieldVault is
     error ZeroAddress();
     error AdapterAssetMismatch(address vault, address adapter);
     error AdapterReturnedShort(uint256 expected, uint256 received);
+    error AdapterStillHoldsShares(uint256 shares);
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error AdminMismatch(address admin_);
+    /// @notice FYP-43: ready cooldown must be unstaked first.
+    error ExistingCooldownReady();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -136,10 +148,15 @@ contract RUSDYieldVault is
 
     // ── ERC4626 overrides ──
 
+    /// @dev <b>FYP-57</b>. See {FyusdYieldVault.totalAssets} — direct
+    ///      transfers of the underlying to this vault are NOT
+    ///      reflected in totalAssets and will be stuck.
     function totalAssets() public view override returns (uint256) {
         return adapter.totalAssets();
     }
 
+    /// @dev FYP-55 patch. See {FyusdYieldVault._deposit} for the
+    ///      allowance-reset rationale.
     function _deposit(
         address caller,
         address receiver,
@@ -150,6 +167,7 @@ contract RUSDYieldVault is
         rusd.safeTransferFrom(caller, address(this), assets);
         rusd.forceApprove(address(adapter), assets);
         adapter.deposit(assets);
+        rusd.forceApprove(address(adapter), 0);
         _mint(receiver, shares);
 
         emit Deposit(caller, receiver, assets, shares);
@@ -164,6 +182,12 @@ contract RUSDYieldVault is
     ) internal pure override {
         revert("vRUSD: use cooldown flow");
     }
+
+    /// @dev FYP-34 patch. See {FyusdYieldVault.maxWithdraw}.
+    function maxWithdraw(address) public pure override returns (uint256) { return 0; }
+    function maxRedeem(address) public pure override returns (uint256) { return 0; }
+    function previewWithdraw(uint256) public pure override returns (uint256) { return 0; }
+    function previewRedeem(uint256) public pure override returns (uint256) { return 0; }
 
     function deposit(uint256 assets, address receiver)
         public
@@ -201,21 +225,25 @@ contract RUSDYieldVault is
     }
 
     // ── Cooldown ──
+    /// @dev FYP-34 patch. See {FyusdYieldVault.cooldownAssets}.
     function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
-        uint256 shares = previewWithdraw(assets);
+        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
     function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
-        uint256 assets = previewRedeem(shares);
+        uint256 assets = _convertToAssets(shares, Math.Rounding.Floor);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
+    /// @dev FYP-41 patch. See {FyusdYieldVault._exitToCooldown} for
+    ///      the cross-vault rationale on switching to asset-based
+    ///      adapter withdraw.
     function _exitToCooldown(address user, uint256 assets, uint256 shares) internal {
         _burn(user, shares);
-        uint256 received = adapter.withdraw(shares);
+        uint256 received = adapter.withdraw(assets);
         if (received < assets) revert AdapterReturnedShort(assets, received);
 
         IERC20(asset()).safeTransfer(address(silo), received);
@@ -223,12 +251,17 @@ contract RUSDYieldVault is
     }
 
     function _accrueCooldown(address user, uint256 assets) internal {
+        UserCooldown storage cd = cooldowns[user];
+        // FYP-43 patch. See {StakedRUSD._accrueCooldown}.
+        if (cd.underlyingAmount > 0 && block.timestamp >= cd.cooldownEnd) {
+            revert ExistingCooldownReady();
+        }
+
         uint256 cooldownDuration = settingManagement.getPoolConfigs(COOLDOWN_CONFIG_KEY);
         if (cooldownDuration == 0) cooldownDuration = DEFAULT_COOLDOWN;
 
         uint256 newEnd = block.timestamp + cooldownDuration;
 
-        UserCooldown storage cd = cooldowns[user];
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
         require(newAmount <= type(uint152).max, "Cooldown overflow");
         cd.underlyingAmount = uint152(newAmount);
@@ -252,16 +285,36 @@ contract RUSDYieldVault is
     }
 
     // ── Admin ──
+    /**
+     * @dev FYP-09 patch. See {FyusdYieldVault.setAdapter} for the
+     *      full rationale — the precondition prevents an admin rebind
+     *      from orphaning principal still parked in the old adapter.
+     */
     function setAdapter(IConcreteAdapter newAdapter) external onlyAdmin {
         if (address(newAdapter) == address(0)) revert ZeroAddress();
         if (newAdapter.asset() != asset()) {
             revert AdapterAssetMismatch(asset(), newAdapter.asset());
         }
+        if (adapter.shareOf(address(this)) != 0) {
+            revert AdapterStillHoldsShares(adapter.shareOf(address(this)));
+        }
         emit AdapterUpdated(address(adapter), address(newAdapter));
         adapter = newAdapter;
     }
 
+    /// @notice Admin recovery hatch for Concrete shares parked on the
+    ///         adapter outside of the deposit path. See
+    ///         {FyusdYieldVault.sweepAdapterConcreteShares} for design.
+    function sweepAdapterConcreteShares(address to) external onlyAdmin returns (uint256 swept) {
+        if (to == address(0)) revert ZeroAddress();
+        return IConcreteAdapterSweepable(address(adapter)).sweepConcreteShares(to);
+    }
+
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser.
+        if (newPauser == address(0)) revert ZeroAddress();
+        // FYP-39: skip the SSTORE + event when the value is unchanged.
+        if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;
     }

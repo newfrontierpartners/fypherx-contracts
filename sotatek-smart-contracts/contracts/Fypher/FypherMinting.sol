@@ -13,6 +13,14 @@ interface IRUSD {
     function mint(address to, uint256 amount) external;
 }
 
+/// @dev RUSD inherits ERC20BurnableUpgradeable, exposing `burn(uint256)`
+///      that destroys the caller's own balance. Used by {executeRedeem}
+///      to burn the user's escrowed RUSD in lockstep with collateral
+///      release (FYP-08 patch).
+interface IRUSDBurnable {
+    function burn(uint256 amount) external;
+}
+
 /**
  * @title FypherMinting
  * @notice Collateral order matching and RUSD redeem with per-block rate limiting.
@@ -94,10 +102,29 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
 
     // ── Constants ──
     uint256 private constant BPS_DENOMINATOR = 10_000;
+    /// @notice FYP-50 patch. Hard cap on route legs per mint. 8 is
+    ///         generous against the realistic 2-3 custodian split
+    ///         and tight enough that {_distributeCollateral} stays
+    ///         cheap.
+    uint256 public constant MAX_ROUTE_LEGS = 8;
 
     bytes32 public constant ORDER_TYPEHASH =
         keccak256(
             "Order(uint8 orderType,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 rusd_amount,uint256 nonce,uint256 expiry)"
+        );
+
+    /**
+     * @notice FYP-46 patch. EIP-712 type-hash for the route-bound
+     *         mint flow. Backend that wants to constrain which
+     *         custodians + ratios the mint can use signs over the
+     *         {Order} fields PLUS a `route_hash =
+     *         keccak256(abi.encode(route.addresses, route.ratios))`.
+     *         The relayer / caller MUST then submit the exact route
+     *         that hashes to that value; any mismatch reverts.
+     */
+    bytes32 public constant ORDER_BOUND_TYPEHASH =
+        keccak256(
+            "Order(uint8 orderType,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 rusd_amount,uint256 nonce,uint256 expiry,bytes32 route_hash)"
         );
 
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
@@ -231,6 +258,11 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     event PauserRoleUpdated(address indexed oldPauser, address indexed newPauser);
     event MintPausedSet(address indexed asset, bool paused);
     event BurnPausedSet(address indexed asset, bool paused);
+    // FYP-60 patch: per-asset cap setters now emit so the indexer can
+    // track rate-limit configuration changes.
+    event MaxMintPerAssetUpdated(address indexed asset, uint256 limit);
+    event MaxRedeemPerAssetUpdated(address indexed asset, uint256 limit);
+    event StablesDeltaLimitUpdated(uint256 limit);
 
     // ── Errors ──
     error NotAdmin();
@@ -238,6 +270,9 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     error NotPauserOrAdmin();
     error MintRedeemDisabled();
     error MintPausedForAsset();
+    /// @notice FYP-44: per-asset burnPaused flag was set, redemption
+    ///         flow blocks new requests / executions on that asset.
+    error BurnPausedForAsset();
     error InvalidSignature();
     error InvalidNonce();
     error ExpiredOrder();
@@ -253,6 +288,8 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     error AssetMaxMintExceeded(address asset); // April-audit M-7
     error AssetMaxRedeemExceeded(address asset); // April-audit M-7
     error AmountMismatch(); // April-audit H-1: order amount must match escrow
+    /// @notice FYP-50: route exceeded MAX_ROUTE_LEGS.
+    error RouteTooLong(uint256 length, uint256 cap);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -312,6 +349,27 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     }
 
     // ── Core: Mint ──
+    /**
+     * @notice Execute a backend-signed mint order. Pulls
+     *         {order.collateral_amount} of {order.collateral_asset}
+     *         from {order.benefactor} (routed across whitelisted
+     *         custodians per {route}) and mints {order.rusd_amount}
+     *         RUSD to {order.beneficiary}.
+     *
+     * @dev <b>FYP-49 — permissionless submission</b>. Any address that
+     *      holds a valid backend-signed {Order} + matching {route} can
+     *      call this function. The benefactor's collateral approval is
+     *      still required (the contract calls
+     *      {safeTransferFrom(benefactor, custodian, amount)} inside
+     *      {_distributeCollateral}), so a third-party caller cannot
+     *      drain a benefactor who never opted in. This shape is
+     *      intentional: it lets a relayer (paymaster / sponsored-tx
+     *      service) submit on behalf of the benefactor for gas-
+     *      sponsorship flows. Off-chain integrators that need
+     *      "only-benefactor-can-call" semantics should bind the
+     *      benefactor key directly rather than relying on contract-
+     *      level gating.
+     */
     function mint(
         Order calldata order,
         Route calldata route,
@@ -357,6 +415,66 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         bytes calldata
     ) external payable {
         revert DeprecatedFunction();
+    }
+
+    /**
+     * @notice Route-bound mint flow. Identical to {mint}, except the
+     *         backend signature MUST cover the route hash. The hash
+     *         is computed on-chain as
+     *           keccak256(abi.encode(route.addresses, route.ratios))
+     *         and bound into the digest via the
+     *         {ORDER_BOUND_TYPEHASH} EIP-712 type. Anyone calling
+     *         {mintBound} with a route that does not hash to the
+     *         signed value fails {InvalidSignature}.
+     *
+     * @dev FYP-46 patch. The legacy {mint} entry-point only binds
+     *      the (asset, amounts) tuple — the route is caller-chosen
+     *      within the custodian whitelist. That means a relayer
+     *      can override the protocol's off-chain risk policy on
+     *      custodian split, even with a valid signature. The new
+     *      {mintBound} closes that gap by requiring the route to
+     *      match the backend's signed intent.
+     *
+     *      We keep {mint} working for backward compatibility — the
+     *      backend cutover to {mintBound} can happen
+     *      asynchronously. Once every signer is on the v2
+     *      typehash, {mint} can be deprecated to a reverting stub
+     *      in a future implementation.
+     */
+    function mintBound(
+        Order calldata order,
+        Route calldata route,
+        bytes calldata signature
+    ) external nonReentrant whenMintAllowed(order.collateral_asset) {
+        if (order.collateral_amount == 0 || order.rusd_amount == 0) revert InvalidAmount();
+        if (order.beneficiary == address(0)) revert ZeroAddress();
+        if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
+        if (_usedNonces[order.benefactor][order.nonce]) revert InvalidNonce();
+
+        bytes32 rh = keccak256(abi.encode(route.addresses, route.ratios));
+        _verifyBoundOrderSignature(order, rh, signature, OrderType.MINT);
+
+        _checkMintLimit(order.collateral_asset, order.rusd_amount);
+        _checkStablesDelta(order.rusd_amount, 0);
+
+        // Route is validated inside (custodian whitelist + ratio sum +
+        // last-leg rounding remainder per FYP-48). Length cap from
+        // FYP-50 applies.
+        _distributeCollateral(order, route);
+
+        mintedPerBlock[block.number] += order.rusd_amount;
+        mintedPerAssetPerBlock[order.collateral_asset][block.number] += order.rusd_amount;
+        _usedNonces[order.benefactor][order.nonce] = true;
+
+        IRUSD(address(rusd)).mint(order.beneficiary, order.rusd_amount);
+
+        emit Mint(
+            order.benefactor,
+            order.beneficiary,
+            order.collateral_asset,
+            order.collateral_amount,
+            order.rusd_amount
+        );
     }
 
     // ── Core: Redeem ──
@@ -417,12 +535,37 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
      *      order with the wrong amount.
      *
      * @dev April-audit M-7 patch. Per-asset redeem cap is now enforced.
+     *
+     * @dev FYP-08 patch. The escrowed RUSD is now BURNED in the same
+     *      transaction the collateral is released. The previous shape
+     *      released collateral and deleted the escrow record but left
+     *      the user's RUSD permanently parked in this contract's
+     *      balance — it had no on-chain recovery path today, but
+     *      every successful redeem drifted `RUSD.totalSupply()`
+     *      upward relative to actual circulating supply, breaking the
+     *      `totalSupply ≤ collateral backing` invariant the README
+     *      flags as critical. Burning here also matches the pattern
+     *      {FypherBurnQueue.requestBurn} already uses (it burns RUSD
+     *      immediately and only escrows the collateral promise).
      */
     function executeRedeem(
         Order calldata order,
         bytes calldata signature
     ) external onlyExecutor nonReentrant whenMintRedeemEnabled {
         if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
+        // FYP-44 patch. The {burnPaused} mapping had an admin setter
+        // ({setBurnPaused}) and a {BurnPausedSet} event but no read
+        // path — flipping the flag was operationally misleading
+        // because it did not actually pause the redemption flow.
+        // Now that the flag is enforced, ops can pause a specific
+        // collateral asset's redemptions (e.g. on a Bitgo asset-
+        // specific incident) without disabling the rest of the
+        // pipeline. {requestRedeem} is asset-agnostic at escrow
+        // time (no `collateral_asset` field on the user-side call),
+        // so the gate only fires at executor settlement, but the
+        // user can still {cancelRedeem} to recover the escrowed
+        // RUSD while the asset stays paused.
+        if (burnPaused[order.collateral_asset]) revert BurnPausedForAsset();
 
         _verifyOrderSignature(order, signature, OrderType.REDEEM);
         _checkRedeemLimit(order.collateral_asset, order.rusd_amount);
@@ -436,6 +579,13 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         redeemedPerBlock[block.number] += order.rusd_amount;
         redeemedPerAssetPerBlock[order.collateral_asset][block.number] += order.rusd_amount;
         // H-1: _usedNonces was already set in requestRedeem; do not double-set.
+
+        // FYP-08: burn the escrowed RUSD before paying out collateral
+        // so the supply contracts in lockstep with the backing. This
+        // contract holds the escrowed balance (transferred in by
+        // {requestRedeem}), so the plain `burn(amount)` call destroys
+        // exactly the right balance — no allowance or approval needed.
+        IRUSDBurnable(address(rusd)).burn(order.rusd_amount);
 
         IERC20(order.collateral_asset).safeTransfer(order.beneficiary, order.collateral_amount);
 
@@ -467,23 +617,50 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     }
 
     // ── Internal helpers ──
+    /**
+     * @dev FYP-48 patch. The previous shape distributed each leg as
+     *      `collateral_amount * ratio / BPS_DENOMINATOR` with floor
+     *      division. With ratios that don't perfectly divide the
+     *      collateral_amount, the sum of legs could be 1 to (n-1)
+     *      wei short of `collateral_amount` — the benefactor minted
+     *      the full RUSD against a slightly under-collected
+     *      collateral total. We now route the rounding remainder to
+     *      the LAST custodian by tracking the cumulative amount
+     *      distributed across the first (n-1) legs and assigning
+     *      the residue (`collateral_amount - cumulative`) to leg n.
+     *
+     * @dev FYP-61: dropped the `unchecked { ++i; }` block — solc
+     *      0.8.22 already elides the loop-counter overflow check for
+     *      the standard `for (...; ++i)` shape.
+     */
     function _distributeCollateral(Order calldata order, Route calldata route) private {
         uint256 n = route.addresses.length;
         if (n == 0 || n != route.ratios.length) revert InvalidRoute();
+        if (n > MAX_ROUTE_LEGS) revert RouteTooLong(n, MAX_ROUTE_LEGS);
         IERC20 collateral = IERC20(order.collateral_asset);
         uint256 totalRatio;
-        for (uint256 i = 0; i < n; ) {
+        uint256 distributed;
+        uint256 last = n - 1;
+        for (uint256 i = 0; i < n; ++i) {
             address dest = route.addresses[i];
             uint256 ratio = route.ratios[i];
             if (dest == address(0)) revert InvalidRoute();
             if (!custodianAddresses[dest]) revert InvalidRoute();
             if (ratio == 0) revert InvalidRoute();
             totalRatio += ratio;
-            uint256 amount = (order.collateral_amount * ratio) / BPS_DENOMINATOR;
+            uint256 amount;
+            if (i == last) {
+                // Last leg absorbs the rounding remainder so the sum
+                // of distributed amounts equals collateral_amount
+                // exactly (FYP-48).
+                amount = order.collateral_amount - distributed;
+            } else {
+                amount = (order.collateral_amount * ratio) / BPS_DENOMINATOR;
+                distributed += amount;
+            }
             if (amount > 0) {
                 collateral.safeTransferFrom(order.benefactor, dest, amount);
             }
-            unchecked { ++i; }
         }
         if (totalRatio != BPS_DENOMINATOR) revert InvalidRoute();
     }
@@ -513,6 +690,24 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     ) internal view {
         if (block.timestamp > order.expiry) revert ExpiredOrder();
         bytes32 structHash = _hashOrder(order, orderType);
+        bytes32 d = _digestFromStruct(structHash);
+        address recovered = d.recover(signature);
+        if (recovered != backendSigner) revert InvalidSignature();
+    }
+
+    /// @dev FYP-46 patch. Route-bound counterpart of
+    ///      {_verifyOrderSignature}. Builds the struct hash from
+    ///      {ORDER_BOUND_TYPEHASH} so the recovered signer must
+    ///      have signed over `routeHash` in addition to the
+    ///      standard order fields.
+    function _verifyBoundOrderSignature(
+        Order calldata order,
+        bytes32 routeHash_,
+        bytes calldata signature,
+        OrderType orderType
+    ) internal view {
+        if (block.timestamp > order.expiry) revert ExpiredOrder();
+        bytes32 structHash = _hashBoundOrder(order, routeHash_, orderType);
         bytes32 d = _digestFromStruct(structHash);
         address recovered = d.recover(signature);
         if (recovered != backendSigner) revert InvalidSignature();
@@ -581,6 +776,28 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         );
     }
 
+    /// @dev FYP-46 patch. Struct-hash helper for the route-bound flow.
+    function _hashBoundOrder(
+        Order calldata order,
+        bytes32 routeHash_,
+        OrderType orderType
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                ORDER_BOUND_TYPEHASH,
+                uint8(orderType),
+                order.benefactor,
+                order.beneficiary,
+                order.collateral_asset,
+                order.collateral_amount,
+                order.rusd_amount,
+                order.nonce,
+                order.expiry,
+                routeHash_
+            )
+        );
+    }
+
     function _domainSeparatorV4() internal view returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -637,11 +854,25 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         return abi.encode(order);
     }
 
+    /**
+     * @notice True iff `signature` is a valid backend-signed digest
+     *         for `order` under `orderType` AND the order is not yet
+     *         expired.
+     *
+     * @dev FYP-30 patch. The previous implementation only checked the
+     *      signature recovery, so an off-chain integrator polling
+     *      {verifyOrder} would treat an expired order as still
+     *      valid — but the corresponding {mint} / {executeRedeem}
+     *      call would revert with {ExpiredOrder}. Folding the
+     *      expiry check into the view brings it in line with the
+     *      authoritative path.
+     */
     function verifyOrder(
         Order calldata order,
         bytes calldata signature,
         OrderType orderType
     ) external view returns (bool) {
+        if (block.timestamp > order.expiry) return false;
         bytes32 d = _digestFromStruct(_hashOrder(order, orderType));
         return d.recover(signature) == backendSigner;
     }
@@ -656,6 +887,54 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
 
     function verifyNonce(address account, uint256 nonce) external view returns (bool) {
         return !_usedNonces[account][nonce];
+    }
+
+    /**
+     * @notice Compute the route hash that the backend MUST sign over
+     *         when using {mintBound}. Exposed so off-chain tooling
+     *         can pre-compute the value without re-implementing
+     *         abi.encode semantics.
+     * @dev FYP-46 patch.
+     */
+    function routeHash(Route calldata route) external pure returns (bytes32) {
+        return keccak256(abi.encode(route.addresses, route.ratios));
+    }
+
+    /**
+     * @notice Struct hash of the EIP-712 bound order. Pairs with
+     *         {ORDER_BOUND_TYPEHASH}.
+     */
+    function hashBoundOrder(
+        Order calldata order,
+        bytes32 routeHash_,
+        OrderType orderType
+    ) external pure returns (bytes32) {
+        return _hashBoundOrder(order, routeHash_, orderType);
+    }
+
+    /// @notice Full digest the backend signer must sign for the
+    ///         route-bound mint path.
+    function digestBound(
+        Order calldata order,
+        bytes32 routeHash_,
+        OrderType orderType
+    ) external view returns (bytes32) {
+        return _digestFromStruct(_hashBoundOrder(order, routeHash_, orderType));
+    }
+
+    /// @notice True iff `signature` is a valid backend signature over
+    ///         the (order, computed-routeHash, orderType) tuple AND
+    ///         the order is unexpired.
+    function verifyBoundOrder(
+        Order calldata order,
+        Route calldata route,
+        bytes calldata signature,
+        OrderType orderType
+    ) external view returns (bool) {
+        if (block.timestamp > order.expiry) return false;
+        bytes32 rh = keccak256(abi.encode(route.addresses, route.ratios));
+        bytes32 d = _digestFromStruct(_hashBoundOrder(order, rh, orderType));
+        return d.recover(signature) == backendSigner;
     }
 
     /**
@@ -694,56 +973,71 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     }
 
     // ── Admin ──
+    // FYP-39: all setters below skip the SSTORE + event when the new
+    // value matches the live value, so dashboard "re-apply config"
+    // transactions become free no-ops.
     function addSupportedAsset(address asset) external onlyAdmin {
         if (asset == address(0)) revert ZeroAddress();
+        if (supportedAssets[asset]) return;
         supportedAssets[asset] = true;
         emit AssetAdded(asset);
     }
 
     function removeSupportedAsset(address asset) external onlyAdmin {
+        if (!supportedAssets[asset]) return;
         supportedAssets[asset] = false;
         emit AssetRemoved(asset);
     }
 
     function addCustodianAddress(address custodian) external onlyAdmin {
         if (custodian == address(0)) revert ZeroAddress();
+        if (custodianAddresses[custodian]) return;
         custodianAddresses[custodian] = true;
         emit CustodianAdded(custodian);
     }
 
     function removeCustodianAddress(address custodian) external onlyAdmin {
+        if (!custodianAddresses[custodian]) return;
         custodianAddresses[custodian] = false;
         emit CustodianRemoved(custodian);
     }
 
     function setBackendSigner(address signer) external onlyAdmin {
         if (signer == address(0)) revert ZeroAddress();
+        if (signer == backendSigner) return;
         backendSigner = signer;
         emit SignerUpdated(signer);
     }
 
     function setBackendExecutor(address executor) external onlyAdmin {
         if (executor == address(0)) revert ZeroAddress();
+        if (executor == backendExecutor) return;
         backendExecutor = executor;
         emit ExecutorUpdated(executor);
     }
 
     function setGlobalMaxMintPerBlock(uint256 limit) external onlyAdmin {
+        if (limit == globalMaxMintPerBlock) return;
         globalMaxMintPerBlock = limit;
         emit MaxMintPerBlockUpdated(limit);
     }
 
     function setGlobalMaxRedeemPerBlock(uint256 limit) external onlyAdmin {
+        if (limit == globalMaxRedeemPerBlock) return;
         globalMaxRedeemPerBlock = limit;
         emit MaxRedeemPerBlockUpdated(limit);
     }
 
     function setMaxMintPerBlock(address asset, uint256 limit) external onlyAdmin {
+        if (maxMintPerBlock[asset] == limit) return;
         maxMintPerBlock[asset] = limit;
+        emit MaxMintPerAssetUpdated(asset, limit);  // FYP-60
     }
 
     function setMaxRedeemPerBlock(address asset, uint256 limit) external onlyAdmin {
+        if (maxRedeemPerBlock[asset] == limit) return;
         maxRedeemPerBlock[asset] = limit;
+        emit MaxRedeemPerAssetUpdated(asset, limit);  // FYP-60
     }
 
     /**
@@ -758,10 +1052,13 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
      *      on-chain effect.
      */
     function setStablesDeltaLimit(uint256 limit) external onlyAdmin {
+        if (limit == stablesDeltaLimit) return;
         stablesDeltaLimit = limit;
+        emit StablesDeltaLimitUpdated(limit);  // FYP-60
     }
 
     function disableMintRedeem(bool disabled) external onlyAdmin {
+        if (disabled == mintRedeemDisabled) return;
         mintRedeemDisabled = disabled;
         emit MintRedeemToggled(disabled);
     }
@@ -780,6 +1077,7 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
             // Unpause requires admin (multisig) only.
             if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
         }
+        if (mintPaused[asset] == paused) return;
         mintPaused[asset] = paused;
         emit MintPausedSet(asset, paused);
     }
@@ -793,11 +1091,18 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         if (!paused) {
             if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
         }
+        if (burnPaused[asset] == paused) return;
         burnPaused[asset] = paused;
         emit BurnPausedSet(asset, paused);
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser. The pauser slot is consulted by
+        // {onlyPauserOrAdmin}, and the slot's default value 0 already
+        // means "no pauser configured". Re-setting to zero is a no-op
+        // attempt; reject explicitly so the operator sees the typo.
+        if (newPauser == address(0)) revert ZeroAddress();
+        if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;
     }

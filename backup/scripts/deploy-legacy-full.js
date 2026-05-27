@@ -4,8 +4,8 @@ const addresses = require("./lib/addresses");
 // MockERC20 must never be deployed to a real production network — minting to
 // deployer is unrestricted and deploying these tokens on mainnet would brick
 // state (real users could be tricked into transacting against fake collateral).
-// Restrict to local and BSC Testnet only.
-const ALLOWED_MOCK_NETWORKS = ["hardhat", "localhost", "bscTestnet", "sepolia"];
+// Restrict to local and testnets only.
+const ALLOWED_MOCK_NETWORKS = ["hardhat", "localhost", "sepolia", "hoodi"];
 
 async function main() {
   const [deployer] = await ethers.getSigners();
@@ -14,7 +14,7 @@ async function main() {
   console.log("═══════════════════════════════════════════════════════");
   console.log("Deployer:", deployer.address);
   const balance = await ethers.provider.getBalance(deployer.address);
-  const nativeSym = network.name === "bscTestnet" ? "BNB" : "ETH";
+  const nativeSym = "ETH";
   console.log("Balance:", ethers.formatEther(balance), nativeSym, "\n");
 
   const deployed = {};

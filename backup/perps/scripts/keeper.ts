@@ -50,17 +50,17 @@ const RECONNECT_BASE_MS = 1_500;
 const RECONNECT_MAX_MS = 30_000;
 const WS_PING_MS = 180_000;                                       // 3 min
 
-const RPC_URL = process.env.BSC_TESTNET_RPC || "https://data-seed-prebsc-1-s1.binance.org:8545";
+const RPC_URL = process.env.HOODI_RPC_URL || "https://ethereum-hoodi-rpc.publicnode.com";
 const PK = process.env.DEPLOYER_PRIVATE_KEY;
 if (!PK) throw new Error("DEPLOYER_PRIVATE_KEY missing in .env");
 
-const EXPLORER = "https://testnet.bscscan.com";
+const EXPLORER = "https://hoodi.etherscan.io";
 
 type Deployments = {
   oracles: Record<string, { feed: string; decimals: number }>;
 };
 const deployments: Deployments = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "..", "deployments", "bscTestnet.json"), "utf8")
+  fs.readFileSync(path.join(__dirname, "..", "deployments", "hoodi.json"), "utf8")
 );
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);

@@ -8,7 +8,7 @@
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.js --network localhost",
     "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
-    "deploy:bscTestnet": "hardhat run scripts/deploy.js --network bscTestnet",
+    "deploy:hoodi": "hardhat run scripts/deploy.js --network hoodi",
     "demo": "ts-node scripts/demo.ts",
     "demo:status": "ts-node scripts/demo.ts status",
     "demo:sync": "ts-node scripts/demo.ts sync-price",
