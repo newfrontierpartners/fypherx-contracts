@@ -191,13 +191,20 @@ describe("FyusdYieldVault (vFYUSD ERC4626)", () => {
     it("direct withdraw and redeem revert (cooldown-only exit)", async () => {
       const { alice, vault } = await deployFixture();
       await (await vault.connect(alice).deposit(500n * ONE, alice.address)).wait();
+      // FYP-34 patch: {maxWithdraw} / {maxRedeem} now return 0, so
+      // the OZ ERC4626 withdraw entry-point reverts with the
+      // upstream {ERC4626ExceededMaxWithdraw} / {ERC4626ExceededMaxRedeem}
+      // before our internal {_withdraw} ever runs. Either error path
+      // signals the same thing — synchronous exits are not allowed.
       await assert.rejects(
         vault.connect(alice).withdraw(100n * ONE, alice.address, alice.address),
-        (err) => err.message.includes("use cooldown flow"),
+        (err) => err.message.includes("ERC4626ExceededMaxWithdraw") ||
+                 err.message.includes("use cooldown flow"),
       );
       await assert.rejects(
         vault.connect(alice).redeem(100n * ONE, alice.address, alice.address),
-        (err) => err.message.includes("use cooldown flow"),
+        (err) => err.message.includes("ERC4626ExceededMaxRedeem") ||
+                 err.message.includes("use cooldown flow"),
       );
     });
   });

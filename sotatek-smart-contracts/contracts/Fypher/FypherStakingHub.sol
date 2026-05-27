@@ -55,6 +55,14 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
 
     // ── Constants ──
     uint256 private constant ACC_PRECISION = 1e18;
+    /// @notice FYP-50 patch. Hard cap on the number of pools so that
+    ///         {addPool} / {setPoolWeight} / {setFpyPerBlock} mass-
+    ///         update sweeps stay within a sensible gas budget.
+    uint256 public constant MAX_POOLS = 16;
+    /// @notice FYP-50 patch. Hard cap on per-call migrate batch size.
+    ///         Keeps {migrate} below the block-gas-limit pain point
+    ///         even on chains with stricter limits.
+    uint256 public constant MAX_MIGRATE_BATCH = 200;
 
     // ── Types ──
 
@@ -139,6 +147,10 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
     ///         with reward inventory in the same ERC-20 balance, and
     ///         reward payments could chew into staked principal.
     error UnderlyingIsRewardToken();
+    /// @notice FYP-50: pool count would exceed MAX_POOLS.
+    error TooManyPools(uint256 cap);
+    /// @notice FYP-50: migrate batch size would exceed MAX_MIGRATE_BATCH.
+    error BatchTooLarge(uint256 size, uint256 cap);
 
     // ── Init ──
 
@@ -200,6 +212,9 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         // rewards and {unstake} could fail because the reward sink
         // already drained the principal.
         if (address(underlying) == address(fpy)) revert UnderlyingIsRewardToken();
+        // FYP-50: enforce the soft cap on pools so the mass-update
+        // sweeps below stay cheap.
+        if (_pools.length >= MAX_POOLS) revert TooManyPools(MAX_POOLS);
         // FYP-38: cache .length so the duplicate check and the settle
         // sweep share a single SLOAD.
         uint256 n = _pools.length;
@@ -276,6 +291,33 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         pauserRole = newPauser;
     }
 
+    /**
+     * @notice Pause a pool. PAUSE callable by pauserRole or admin
+     *         (ADR-007 latency-critical); UNPAUSE admin-only.
+     *
+     * @dev <b>FYP-14 — pause coverage</b>. The pool-pause flag
+     *      affects ONLY {stake} (new exposure to the paused
+     *      pool is blocked). {unstake}, {claim}, {claimRewards},
+     *      and reward accrual ({_updatePool} via emission rate)
+     *      stay live by design:
+     *
+     *        - {unstake} stays live so the pause cannot trap
+     *          principal. The user always retains the right to
+     *          exit a position they already opened.
+     *        - {claim} and {claimRewards} stay live so a user's
+     *          already-earned rewards remain claimable while ops
+     *          investigates whatever incident caused the pause.
+     *        - Reward accrual stays live so a paused pool's
+     *          existing stakers continue to earn at their
+     *          weight; pausing is "stop new exposure", not
+     *          "punish existing stakers".
+     *
+     *      Operators that need full "freeze every interaction"
+     *      semantics should call {setFpyPerBlock(0)} (halts
+     *      emissions globally) AND keep the pool paused
+     *      (blocks new stakes). Per-pool full freeze is not in
+     *      scope for this contract.
+     */
     function setPoolPaused(uint256 poolId, bool paused)
         external
         onlyPauserOrAdmin
@@ -313,6 +355,7 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
         uint256[] calldata amounts
     ) external onlyAdmin nonReentrant validPool(poolId) {
         if (users.length != amounts.length) revert LengthMismatch();
+        if (users.length > MAX_MIGRATE_BATCH) revert BatchTooLarge(users.length, MAX_MIGRATE_BATCH);
         _updatePool(poolId);
 
         Pool storage p = _pools[poolId];

@@ -7,6 +7,7 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUp
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "./IConcreteAdapter.sol";
@@ -169,6 +170,16 @@ contract FyusdYieldVault is
     ///         adapter currently controls on our behalf. The vault itself
     ///         does NOT hold active FYUSD; cooldown balances are escrowed
     ///         in the silo and excluded by construction.
+    ///
+    /// @dev <b>FYP-57</b>. Any FYUSD transferred DIRECTLY to this
+    ///      contract (by mistake or by a third party) is NOT
+    ///      reflected in {totalAssets} — by design. Deposits must
+    ///      go through {deposit} / {mint} so the adapter is funded
+    ///      and the per-share NAV stays consistent. Direct transfers
+    ///      become stuck (the vault's {rescueTokens} explicitly
+    ///      rejects rescuing the underlying asset). Frontend /
+    ///      integrators MUST route every FYUSD inflow through the
+    ///      ERC-4626 entry points.
     function totalAssets() public view override returns (uint256) {
         return adapter.totalAssets();
     }
@@ -180,6 +191,15 @@ contract FyusdYieldVault is
      *      adapter.shareOf(vault) start from 0 and grow in lockstep with
      *      the same NAV expansion).
      */
+    /**
+     * @dev FYP-55 patch. Resets the adapter allowance back to 0 after
+     *      the deposit call so any unconsumed remainder cannot be
+     *      pulled by the adapter later. With the current
+     *      ConcreteAdapterV1 this is belt-and-braces — that adapter
+     *      consumes the full approved amount synchronously — but the
+     *      reset insulates the vault from future adapter swaps that
+     *      may not.
+     */
     function _deposit(
         address caller,
         address receiver,
@@ -190,6 +210,7 @@ contract FyusdYieldVault is
         fyusd.safeTransferFrom(caller, address(this), assets);
         fyusd.forceApprove(address(adapter), assets);
         adapter.deposit(assets);
+        fyusd.forceApprove(address(adapter), 0);
         _mint(receiver, shares);
 
         emit Deposit(caller, receiver, assets, shares);
@@ -210,6 +231,30 @@ contract FyusdYieldVault is
         uint256 /* shares */
     ) internal pure override {
         revert("vFYUSD: use cooldown flow");
+    }
+
+    /// @notice ERC-4626 advertisement that synchronous exits are
+    ///         disabled — the cooldown flow is the only exit path.
+    /// @dev FYP-34 patch. Without these overrides, ERC-4626
+    ///      integrators that consult {maxWithdraw} / {maxRedeem}
+    ///      get a non-zero value (computed from
+    ///      `_convertToAssets(balanceOf(owner))`) and assume
+    ///      a synchronous exit is available; the actual
+    ///      {_withdraw} call then reverts with
+    ///      "vFYUSD: use cooldown flow". Returning 0 here matches
+    ///      the staked-vault pattern and removes the
+    ///      misleading-signal surface.
+    function maxWithdraw(address) public pure override returns (uint256) {
+        return 0;
+    }
+    function maxRedeem(address) public pure override returns (uint256) {
+        return 0;
+    }
+    function previewWithdraw(uint256) public pure override returns (uint256) {
+        return 0;
+    }
+    function previewRedeem(uint256) public pure override returns (uint256) {
+        return 0;
     }
 
     function deposit(uint256 assets, address receiver)
@@ -253,6 +298,14 @@ contract FyusdYieldVault is
     }
 
     // ── Cooldown ──
+    /// @dev FYP-34 patch. Internal conversion via OZ's
+    ///      {_convertToShares} / {_convertToAssets} so that the
+    ///      public {previewWithdraw} / {previewRedeem} can return 0
+    ///      (matching {maxWithdraw} / {maxRedeem}) without breaking
+    ///      the cooldown math. Rounding modes mirror the OZ
+    ///      defaults the previous {previewWithdraw} / {previewRedeem}
+    ///      path used (Ceil for shares burned, Floor for assets
+    ///      delivered).
     function cooldownAssets(uint256 assets)
         external
         override
@@ -260,7 +313,7 @@ contract FyusdYieldVault is
         whenNotPaused
     {
         if (assets == 0) revert ZeroAmount();
-        uint256 shares = previewWithdraw(assets);
+        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
@@ -271,7 +324,7 @@ contract FyusdYieldVault is
         whenNotPaused
     {
         if (shares == 0) revert ZeroAmount();
-        uint256 assets = previewRedeem(shares);
+        uint256 assets = _convertToAssets(shares, Math.Rounding.Floor);
         _exitToCooldown(msg.sender, assets, shares);
     }
 

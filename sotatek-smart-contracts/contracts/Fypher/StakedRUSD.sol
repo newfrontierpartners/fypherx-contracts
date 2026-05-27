@@ -62,6 +62,14 @@ contract StakedRUSD is
     // ── Constants ──
     uint256 public constant VESTING_PERIOD = 8 hours;
     uint256 public constant SETTING_MANAGER_TIMELOCK = 2 days;
+    /// @notice Floor for the cooldown duration when SettingManagement
+    ///         returns 0 for `"cooldownDuration"`. Without this floor
+    ///         (FYP-37 patch), an unset config silently turned the
+    ///         vault into a no-cooldown vault — staking became
+    ///         instantly exit-able the moment a user called
+    ///         {cooldownAssets}. 7 days matches the README's stated
+    ///         retail-staking cooldown.
+    uint256 public constant DEFAULT_COOLDOWN = 7 days;
     // April-audit L-2 patch. The legacy `MIN_SHARES = 1` constant was
     // declared here but never read by any function. The intended
     // first-depositor inflation guard belongs in OZ ERC4626's
@@ -104,6 +112,8 @@ contract StakedRUSD is
     event SettingManagerUpdated(address indexed newManager);
     event SettingManagerProposed(address indexed newManager, uint256 eta);
     event SettingManagerProposalCancelled(address indexed cancelledManager);
+    /// @notice FYP-60 patch.
+    event RemainingRewardsUpdated(uint256 amount);
 
     // ── Errors ──
     error NotAdmin();
@@ -431,6 +441,7 @@ contract StakedRUSD is
         }
 
         uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
+        if (cooldownDuration == 0) cooldownDuration = DEFAULT_COOLDOWN;  // FYP-37
         uint256 newEnd = block.timestamp + cooldownDuration;
 
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
@@ -533,6 +544,7 @@ contract StakedRUSD is
     function setRemainingRewards(uint256 amount) external onlyAdmin {
         if (amount == remainingRewards) return;
         remainingRewards = amount;
+        emit RemainingRewardsUpdated(amount);  // FYP-60
     }
 
     // ── Admin ──

@@ -102,10 +102,29 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
 
     // ── Constants ──
     uint256 private constant BPS_DENOMINATOR = 10_000;
+    /// @notice FYP-50 patch. Hard cap on route legs per mint. 8 is
+    ///         generous against the realistic 2-3 custodian split
+    ///         and tight enough that {_distributeCollateral} stays
+    ///         cheap.
+    uint256 public constant MAX_ROUTE_LEGS = 8;
 
     bytes32 public constant ORDER_TYPEHASH =
         keccak256(
             "Order(uint8 orderType,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 rusd_amount,uint256 nonce,uint256 expiry)"
+        );
+
+    /**
+     * @notice FYP-46 patch. EIP-712 type-hash for the route-bound
+     *         mint flow. Backend that wants to constrain which
+     *         custodians + ratios the mint can use signs over the
+     *         {Order} fields PLUS a `route_hash =
+     *         keccak256(abi.encode(route.addresses, route.ratios))`.
+     *         The relayer / caller MUST then submit the exact route
+     *         that hashes to that value; any mismatch reverts.
+     */
+    bytes32 public constant ORDER_BOUND_TYPEHASH =
+        keccak256(
+            "Order(uint8 orderType,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 rusd_amount,uint256 nonce,uint256 expiry,bytes32 route_hash)"
         );
 
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
@@ -239,6 +258,11 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     event PauserRoleUpdated(address indexed oldPauser, address indexed newPauser);
     event MintPausedSet(address indexed asset, bool paused);
     event BurnPausedSet(address indexed asset, bool paused);
+    // FYP-60 patch: per-asset cap setters now emit so the indexer can
+    // track rate-limit configuration changes.
+    event MaxMintPerAssetUpdated(address indexed asset, uint256 limit);
+    event MaxRedeemPerAssetUpdated(address indexed asset, uint256 limit);
+    event StablesDeltaLimitUpdated(uint256 limit);
 
     // ── Errors ──
     error NotAdmin();
@@ -264,6 +288,8 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     error AssetMaxMintExceeded(address asset); // April-audit M-7
     error AssetMaxRedeemExceeded(address asset); // April-audit M-7
     error AmountMismatch(); // April-audit H-1: order amount must match escrow
+    /// @notice FYP-50: route exceeded MAX_ROUTE_LEGS.
+    error RouteTooLong(uint256 length, uint256 cap);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -389,6 +415,66 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         bytes calldata
     ) external payable {
         revert DeprecatedFunction();
+    }
+
+    /**
+     * @notice Route-bound mint flow. Identical to {mint}, except the
+     *         backend signature MUST cover the route hash. The hash
+     *         is computed on-chain as
+     *           keccak256(abi.encode(route.addresses, route.ratios))
+     *         and bound into the digest via the
+     *         {ORDER_BOUND_TYPEHASH} EIP-712 type. Anyone calling
+     *         {mintBound} with a route that does not hash to the
+     *         signed value fails {InvalidSignature}.
+     *
+     * @dev FYP-46 patch. The legacy {mint} entry-point only binds
+     *      the (asset, amounts) tuple — the route is caller-chosen
+     *      within the custodian whitelist. That means a relayer
+     *      can override the protocol's off-chain risk policy on
+     *      custodian split, even with a valid signature. The new
+     *      {mintBound} closes that gap by requiring the route to
+     *      match the backend's signed intent.
+     *
+     *      We keep {mint} working for backward compatibility — the
+     *      backend cutover to {mintBound} can happen
+     *      asynchronously. Once every signer is on the v2
+     *      typehash, {mint} can be deprecated to a reverting stub
+     *      in a future implementation.
+     */
+    function mintBound(
+        Order calldata order,
+        Route calldata route,
+        bytes calldata signature
+    ) external nonReentrant whenMintAllowed(order.collateral_asset) {
+        if (order.collateral_amount == 0 || order.rusd_amount == 0) revert InvalidAmount();
+        if (order.beneficiary == address(0)) revert ZeroAddress();
+        if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
+        if (_usedNonces[order.benefactor][order.nonce]) revert InvalidNonce();
+
+        bytes32 rh = keccak256(abi.encode(route.addresses, route.ratios));
+        _verifyBoundOrderSignature(order, rh, signature, OrderType.MINT);
+
+        _checkMintLimit(order.collateral_asset, order.rusd_amount);
+        _checkStablesDelta(order.rusd_amount, 0);
+
+        // Route is validated inside (custodian whitelist + ratio sum +
+        // last-leg rounding remainder per FYP-48). Length cap from
+        // FYP-50 applies.
+        _distributeCollateral(order, route);
+
+        mintedPerBlock[block.number] += order.rusd_amount;
+        mintedPerAssetPerBlock[order.collateral_asset][block.number] += order.rusd_amount;
+        _usedNonces[order.benefactor][order.nonce] = true;
+
+        IRUSD(address(rusd)).mint(order.beneficiary, order.rusd_amount);
+
+        emit Mint(
+            order.benefactor,
+            order.beneficiary,
+            order.collateral_asset,
+            order.collateral_amount,
+            order.rusd_amount
+        );
     }
 
     // ── Core: Redeem ──
@@ -550,6 +636,7 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     function _distributeCollateral(Order calldata order, Route calldata route) private {
         uint256 n = route.addresses.length;
         if (n == 0 || n != route.ratios.length) revert InvalidRoute();
+        if (n > MAX_ROUTE_LEGS) revert RouteTooLong(n, MAX_ROUTE_LEGS);
         IERC20 collateral = IERC20(order.collateral_asset);
         uint256 totalRatio;
         uint256 distributed;
@@ -603,6 +690,24 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     ) internal view {
         if (block.timestamp > order.expiry) revert ExpiredOrder();
         bytes32 structHash = _hashOrder(order, orderType);
+        bytes32 d = _digestFromStruct(structHash);
+        address recovered = d.recover(signature);
+        if (recovered != backendSigner) revert InvalidSignature();
+    }
+
+    /// @dev FYP-46 patch. Route-bound counterpart of
+    ///      {_verifyOrderSignature}. Builds the struct hash from
+    ///      {ORDER_BOUND_TYPEHASH} so the recovered signer must
+    ///      have signed over `routeHash` in addition to the
+    ///      standard order fields.
+    function _verifyBoundOrderSignature(
+        Order calldata order,
+        bytes32 routeHash_,
+        bytes calldata signature,
+        OrderType orderType
+    ) internal view {
+        if (block.timestamp > order.expiry) revert ExpiredOrder();
+        bytes32 structHash = _hashBoundOrder(order, routeHash_, orderType);
         bytes32 d = _digestFromStruct(structHash);
         address recovered = d.recover(signature);
         if (recovered != backendSigner) revert InvalidSignature();
@@ -667,6 +772,28 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
                 order.rusd_amount,
                 order.nonce,
                 order.expiry
+            )
+        );
+    }
+
+    /// @dev FYP-46 patch. Struct-hash helper for the route-bound flow.
+    function _hashBoundOrder(
+        Order calldata order,
+        bytes32 routeHash_,
+        OrderType orderType
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                ORDER_BOUND_TYPEHASH,
+                uint8(orderType),
+                order.benefactor,
+                order.beneficiary,
+                order.collateral_asset,
+                order.collateral_amount,
+                order.rusd_amount,
+                order.nonce,
+                order.expiry,
+                routeHash_
             )
         );
     }
@@ -763,6 +890,54 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     }
 
     /**
+     * @notice Compute the route hash that the backend MUST sign over
+     *         when using {mintBound}. Exposed so off-chain tooling
+     *         can pre-compute the value without re-implementing
+     *         abi.encode semantics.
+     * @dev FYP-46 patch.
+     */
+    function routeHash(Route calldata route) external pure returns (bytes32) {
+        return keccak256(abi.encode(route.addresses, route.ratios));
+    }
+
+    /**
+     * @notice Struct hash of the EIP-712 bound order. Pairs with
+     *         {ORDER_BOUND_TYPEHASH}.
+     */
+    function hashBoundOrder(
+        Order calldata order,
+        bytes32 routeHash_,
+        OrderType orderType
+    ) external pure returns (bytes32) {
+        return _hashBoundOrder(order, routeHash_, orderType);
+    }
+
+    /// @notice Full digest the backend signer must sign for the
+    ///         route-bound mint path.
+    function digestBound(
+        Order calldata order,
+        bytes32 routeHash_,
+        OrderType orderType
+    ) external view returns (bytes32) {
+        return _digestFromStruct(_hashBoundOrder(order, routeHash_, orderType));
+    }
+
+    /// @notice True iff `signature` is a valid backend signature over
+    ///         the (order, computed-routeHash, orderType) tuple AND
+    ///         the order is unexpired.
+    function verifyBoundOrder(
+        Order calldata order,
+        Route calldata route,
+        bytes calldata signature,
+        OrderType orderType
+    ) external view returns (bool) {
+        if (block.timestamp > order.expiry) return false;
+        bytes32 rh = keccak256(abi.encode(route.addresses, route.ratios));
+        bytes32 d = _digestFromStruct(_hashBoundOrder(order, rh, orderType));
+        return d.recover(signature) == backendSigner;
+    }
+
+    /**
      * @notice True iff the route would be accepted by {mint}: non-empty,
      *         lengths match, every destination is a whitelisted custodian
      *         with a non-zero ratio, and the ratios sum to 10_000 bps.
@@ -856,11 +1031,13 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     function setMaxMintPerBlock(address asset, uint256 limit) external onlyAdmin {
         if (maxMintPerBlock[asset] == limit) return;
         maxMintPerBlock[asset] = limit;
+        emit MaxMintPerAssetUpdated(asset, limit);  // FYP-60
     }
 
     function setMaxRedeemPerBlock(address asset, uint256 limit) external onlyAdmin {
         if (maxRedeemPerBlock[asset] == limit) return;
         maxRedeemPerBlock[asset] = limit;
+        emit MaxRedeemPerAssetUpdated(asset, limit);  // FYP-60
     }
 
     /**
@@ -877,6 +1054,7 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     function setStablesDeltaLimit(uint256 limit) external onlyAdmin {
         if (limit == stablesDeltaLimit) return;
         stablesDeltaLimit = limit;
+        emit StablesDeltaLimitUpdated(limit);  // FYP-60
     }
 
     function disableMintRedeem(bool disabled) external onlyAdmin {

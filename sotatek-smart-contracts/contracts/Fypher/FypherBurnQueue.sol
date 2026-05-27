@@ -468,6 +468,31 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
         return _userTickets[user].length;
     }
 
+    /**
+     * @notice Paginated view of a user's ticket history.
+     * @dev FYP-50 patch. {ticketsOf} returns the entire array, which
+     *      can exceed RPC response limits for active retail users.
+     *      This pagination view lets the frontend / indexer fetch
+     *      ticket history in fixed-size slices. The caller-supplied
+     *      `offset` and `limit` bound iteration on-chain; values
+     *      past the array end yield an empty slice rather than a
+     *      revert so dashboards do not need a pre-flight length
+     *      check.
+     */
+    function ticketsOfPage(address user, uint256 offset, uint256 limit)
+        external view returns (uint256[] memory page)
+    {
+        uint256[] storage all = _userTickets[user];
+        uint256 total = all.length;
+        if (offset >= total) return new uint256[](0);
+        uint256 end = offset + limit;
+        if (end > total) end = total;
+        page = new uint256[](end - offset);
+        for (uint256 i = offset; i < end; ++i) {
+            page[i - offset] = all[i];
+        }
+    }
+
     function isNonceUsed(address user, uint256 nonce) external view returns (bool) {
         return _usedNonces[user][nonce];
     }

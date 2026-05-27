@@ -220,9 +220,15 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
         // Snapshot the Concrete-share delta to update our internal
         // tracker, since {accountedConcreteShares} (not raw
         // balanceOf) backs totalAssets going forward.
+        //
+        // FYP-55 patch. Reset the allowance back to zero immediately
+        // after the deposit call so an upstream Concrete vault that
+        // does not consume the full approval cannot pull additional
+        // FYUSD from this adapter on a later call.
         uint256 cBefore = concreteVault.balanceOf(address(this));
         fyusd.forceApprove(address(concreteVault), amount);
         concreteVault.deposit(amount, address(this));
+        fyusd.forceApprove(address(concreteVault), 0);
         uint256 cAfter = concreteVault.balanceOf(address(this));
         accountedConcreteShares += (cAfter - cBefore);
 

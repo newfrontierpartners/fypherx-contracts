@@ -37,6 +37,8 @@ contract StakedFYP is
 
     uint256 public constant VESTING_PERIOD = 8 hours;
     uint256 public constant SETTING_MANAGER_TIMELOCK = 2 days;
+    /// @notice FYP-37 patch. See {StakedRUSD.DEFAULT_COOLDOWN}.
+    uint256 public constant DEFAULT_COOLDOWN = 7 days;
 
     ISettingManagement public settingManagement;
     address public silo;
@@ -62,6 +64,9 @@ contract StakedFYP is
     event SettingManagerUpdated(address indexed newManager);
     event SettingManagerProposed(address indexed newManager, uint256 eta);
     event SettingManagerProposalCancelled(address indexed cancelledManager);
+    // FYP-60 patch.
+    event APRUpdated(uint256 newAPR);
+    event RemainingRewardsUpdated(uint256 amount);
 
     error NotAdmin();
     error NotRewarder();
@@ -270,6 +275,7 @@ contract StakedFYP is
         }
 
         uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
+        if (cooldownDuration == 0) cooldownDuration = DEFAULT_COOLDOWN;  // FYP-37
         uint256 newEnd = block.timestamp + cooldownDuration;
 
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
@@ -369,11 +375,13 @@ contract StakedFYP is
         // FYP-39: skip the SSTORE when the value is unchanged.
         if (newAPR == currentAPRRate) return;
         currentAPRRate = newAPR;
+        emit APRUpdated(newAPR);  // FYP-60
     }
 
     function setRemainingRewards(uint256 amount) external onlyAdmin {
         if (amount == remainingRewards) return;
         remainingRewards = amount;
+        emit RemainingRewardsUpdated(amount);  // FYP-60
     }
 
     // ── Admin ──

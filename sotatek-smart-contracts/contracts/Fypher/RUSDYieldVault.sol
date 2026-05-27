@@ -7,6 +7,7 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/extensions/ERC20PermitUp
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "./IConcreteAdapter.sol";
@@ -147,10 +148,15 @@ contract RUSDYieldVault is
 
     // ── ERC4626 overrides ──
 
+    /// @dev <b>FYP-57</b>. See {FyusdYieldVault.totalAssets} — direct
+    ///      transfers of the underlying to this vault are NOT
+    ///      reflected in totalAssets and will be stuck.
     function totalAssets() public view override returns (uint256) {
         return adapter.totalAssets();
     }
 
+    /// @dev FYP-55 patch. See {FyusdYieldVault._deposit} for the
+    ///      allowance-reset rationale.
     function _deposit(
         address caller,
         address receiver,
@@ -161,6 +167,7 @@ contract RUSDYieldVault is
         rusd.safeTransferFrom(caller, address(this), assets);
         rusd.forceApprove(address(adapter), assets);
         adapter.deposit(assets);
+        rusd.forceApprove(address(adapter), 0);
         _mint(receiver, shares);
 
         emit Deposit(caller, receiver, assets, shares);
@@ -175,6 +182,12 @@ contract RUSDYieldVault is
     ) internal pure override {
         revert("vRUSD: use cooldown flow");
     }
+
+    /// @dev FYP-34 patch. See {FyusdYieldVault.maxWithdraw}.
+    function maxWithdraw(address) public pure override returns (uint256) { return 0; }
+    function maxRedeem(address) public pure override returns (uint256) { return 0; }
+    function previewWithdraw(uint256) public pure override returns (uint256) { return 0; }
+    function previewRedeem(uint256) public pure override returns (uint256) { return 0; }
 
     function deposit(uint256 assets, address receiver)
         public
@@ -212,15 +225,16 @@ contract RUSDYieldVault is
     }
 
     // ── Cooldown ──
+    /// @dev FYP-34 patch. See {FyusdYieldVault.cooldownAssets}.
     function cooldownAssets(uint256 assets) external override nonReentrant whenNotPaused {
         if (assets == 0) revert ZeroAmount();
-        uint256 shares = previewWithdraw(assets);
+        uint256 shares = _convertToShares(assets, Math.Rounding.Ceil);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
     function cooldownShares(uint256 shares) external override nonReentrant whenNotPaused {
         if (shares == 0) revert ZeroAmount();
-        uint256 assets = previewRedeem(shares);
+        uint256 assets = _convertToAssets(shares, Math.Rounding.Floor);
         _exitToCooldown(msg.sender, assets, shares);
     }
 
