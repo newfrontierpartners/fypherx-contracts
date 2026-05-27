@@ -225,6 +225,18 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
     error AlreadyClaimed();
     error NothingToClaim();
     error InvalidLockOffset();
+    /// @notice FYP-30: settleEpoch refuses zero-request epochs (no
+    ///         depositor was credited, no payout would happen).
+    error NoRequestsToSettle();
+    /// @notice FYP-30: settleEpoch must complete before the epoch's
+    ///         {endAt} expiry.
+    error SettlementWindowExpired(uint64 endAt);
+    /// @notice FYP-30: openEpoch refuses to create a new epoch while
+    ///         another is still OPEN.
+    error AnotherEpochOpen(uint256 openEpochId);
+    /// @notice FYP-30: a user's targetAsset must be stable across
+    ///         every request inside the same epoch.
+    error TargetAssetMismatch(address pinned, address provided);
 
     // ── Init ──
 
@@ -277,6 +289,11 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
         returns (uint256 epochId)
     {
         if (lockOffsetSeconds == 0 || lockOffsetSeconds >= durationSeconds) revert InvalidLockOffset();
+        // FYP-30: see {FyusdEpochSettlement.openEpoch}. Refuses to open
+        // a new epoch while the previous is still OPEN.
+        if (nextEpochId != 0 && epochs[nextEpochId].state == EpochState.OPEN) {
+            revert AnotherEpochOpen(nextEpochId);
+        }
         unchecked { epochId = ++nextEpochId; }
         uint64 openAt = uint64(block.timestamp);
         epochs[epochId] = Epoch({
@@ -333,6 +350,16 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
         Epoch storage e = epochs[epochId];
         if (e.state == EpochState.NONE) revert EpochNotFound(epochId);
         if (e.state != EpochState.LOCKED) revert InvalidState(EpochState.LOCKED, e.state);
+        // FYP-30: a settlement is only meaningful if at least one user
+        // actually requested redemption. Without this guard the
+        // executor could lock collateral into an epoch with no
+        // claimants — only the {sweep}-style admin path could
+        // retrieve it.
+        if (e.totalFyusdRequested == 0) revert NoRequestsToSettle();
+        // FYP-30: settle within the epoch lifecycle window. Late
+        // settlements should be {cancelEpoch}'d so users recover
+        // their FYUSD.
+        if (block.timestamp > e.endAt) revert SettlementWindowExpired(e.endAt);
 
         e.state = EpochState.SETTLED;
         e.collateralAsset = collateralAsset_;
@@ -395,12 +422,17 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
         IERC20(address(fyusd)).safeTransferFrom(quote.user, address(this), quote.fyusdAmount);
 
         // Multi-request per (epoch, user) is allowed; sum the requested
-        // amount. targetAsset is recorded only on the first request to
-        // keep the user's hint stable; subsequent requests in the same
-        // epoch reuse it (the contract pays everyone in the admin-chosen
-        // settlement asset anyway, so the hint is informational).
-        if (targetAsset[quote.epochId][quote.user] == address(0)) {
+        // amount. targetAsset is recorded only on the first request and
+        // every subsequent request in the same epoch must reuse it (the
+        // contract still pays everyone in the admin-chosen settlement
+        // asset anyway, but FYP-30 patch enforces internal consistency
+        // so a backend bug that signs two different targetAssets for
+        // the same user does not silently disappear).
+        address pinned = targetAsset[quote.epochId][quote.user];
+        if (pinned == address(0)) {
             targetAsset[quote.epochId][quote.user] = quote.targetAsset;
+        } else if (pinned != quote.targetAsset) {
+            revert TargetAssetMismatch(pinned, quote.targetAsset);
         }
         fyusdRequested[quote.epochId][quote.user] += quote.fyusdAmount;
         e.totalFyusdRequested += quote.fyusdAmount;
@@ -501,6 +533,8 @@ contract FyusdEpochRedemption is Initializable, ReentrancyGuardUpgradeable {
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser.
+        if (newPauser == address(0)) revert ZeroAddress();
         if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;

@@ -271,6 +271,11 @@ contract FypherCircuitBreaker is Initializable, ReentrancyGuardUpgradeable {
     // ── Admin ──
 
     function setWatchdog(address newWatchdog) external onlyAdmin {
+        // FYP-25: zero watchdog is a footgun — the {onlyWatchdogOrAdmin}
+        // modifier would still let the admin trip, but external
+        // dashboards that read {watchdog} for "who can trip" would
+        // see address(0) and assume the role is intentionally unset.
+        if (newWatchdog == address(0)) revert ZeroAddress();
         // FYP-39: skip the SSTORE + event when the value is unchanged.
         if (newWatchdog == watchdog) return;
         emit WatchdogUpdated(watchdog, newWatchdog);

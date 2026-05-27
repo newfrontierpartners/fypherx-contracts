@@ -98,6 +98,8 @@ contract RUSDYieldVault is
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error AdminMismatch(address admin_);
+    /// @notice FYP-43: ready cooldown must be unstaked first.
+    error ExistingCooldownReady();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -232,12 +234,17 @@ contract RUSDYieldVault is
     }
 
     function _accrueCooldown(address user, uint256 assets) internal {
+        UserCooldown storage cd = cooldowns[user];
+        // FYP-43 patch. See {StakedRUSD._accrueCooldown}.
+        if (cd.underlyingAmount > 0 && block.timestamp >= cd.cooldownEnd) {
+            revert ExistingCooldownReady();
+        }
+
         uint256 cooldownDuration = settingManagement.getPoolConfigs(COOLDOWN_CONFIG_KEY);
         if (cooldownDuration == 0) cooldownDuration = DEFAULT_COOLDOWN;
 
         uint256 newEnd = block.timestamp + cooldownDuration;
 
-        UserCooldown storage cd = cooldowns[user];
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
         require(newAmount <= type(uint152).max, "Cooldown overflow");
         cd.underlyingAmount = uint152(newAmount);
@@ -287,6 +294,8 @@ contract RUSDYieldVault is
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser.
+        if (newPauser == address(0)) revert ZeroAddress();
         // FYP-39: skip the SSTORE + event when the value is unchanged.
         if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);

@@ -246,6 +246,9 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     error NotPauserOrAdmin();
     error MintRedeemDisabled();
     error MintPausedForAsset();
+    /// @notice FYP-44: per-asset burnPaused flag was set, redemption
+    ///         flow blocks new requests / executions on that asset.
+    error BurnPausedForAsset();
     error InvalidSignature();
     error InvalidNonce();
     error ExpiredOrder();
@@ -464,6 +467,19 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         bytes calldata signature
     ) external onlyExecutor nonReentrant whenMintRedeemEnabled {
         if (!supportedAssets[order.collateral_asset]) revert UnsupportedAsset();
+        // FYP-44 patch. The {burnPaused} mapping had an admin setter
+        // ({setBurnPaused}) and a {BurnPausedSet} event but no read
+        // path — flipping the flag was operationally misleading
+        // because it did not actually pause the redemption flow.
+        // Now that the flag is enforced, ops can pause a specific
+        // collateral asset's redemptions (e.g. on a Bitgo asset-
+        // specific incident) without disabling the rest of the
+        // pipeline. {requestRedeem} is asset-agnostic at escrow
+        // time (no `collateral_asset` field on the user-side call),
+        // so the gate only fires at executor settlement, but the
+        // user can still {cancelRedeem} to recover the escrowed
+        // RUSD while the asset stays paused.
+        if (burnPaused[order.collateral_asset]) revert BurnPausedForAsset();
 
         _verifyOrderSignature(order, signature, OrderType.REDEEM);
         _checkRedeemLimit(order.collateral_asset, order.rusd_amount);
@@ -515,15 +531,29 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     }
 
     // ── Internal helpers ──
+    /**
+     * @dev FYP-48 patch. The previous shape distributed each leg as
+     *      `collateral_amount * ratio / BPS_DENOMINATOR` with floor
+     *      division. With ratios that don't perfectly divide the
+     *      collateral_amount, the sum of legs could be 1 to (n-1)
+     *      wei short of `collateral_amount` — the benefactor minted
+     *      the full RUSD against a slightly under-collected
+     *      collateral total. We now route the rounding remainder to
+     *      the LAST custodian by tracking the cumulative amount
+     *      distributed across the first (n-1) legs and assigning
+     *      the residue (`collateral_amount - cumulative`) to leg n.
+     *
+     * @dev FYP-61: dropped the `unchecked { ++i; }` block — solc
+     *      0.8.22 already elides the loop-counter overflow check for
+     *      the standard `for (...; ++i)` shape.
+     */
     function _distributeCollateral(Order calldata order, Route calldata route) private {
         uint256 n = route.addresses.length;
         if (n == 0 || n != route.ratios.length) revert InvalidRoute();
         IERC20 collateral = IERC20(order.collateral_asset);
         uint256 totalRatio;
-        // FYP-61: dropped the `unchecked { ++i; }` block — solc 0.8.22
-        // already elides the loop-counter overflow check for the
-        // standard `for (...; ++i)` shape, so the unchecked block
-        // saved no gas while making the loop harder to read.
+        uint256 distributed;
+        uint256 last = n - 1;
         for (uint256 i = 0; i < n; ++i) {
             address dest = route.addresses[i];
             uint256 ratio = route.ratios[i];
@@ -531,7 +561,16 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
             if (!custodianAddresses[dest]) revert InvalidRoute();
             if (ratio == 0) revert InvalidRoute();
             totalRatio += ratio;
-            uint256 amount = (order.collateral_amount * ratio) / BPS_DENOMINATOR;
+            uint256 amount;
+            if (i == last) {
+                // Last leg absorbs the rounding remainder so the sum
+                // of distributed amounts equals collateral_amount
+                // exactly (FYP-48).
+                amount = order.collateral_amount - distributed;
+            } else {
+                amount = (order.collateral_amount * ratio) / BPS_DENOMINATOR;
+                distributed += amount;
+            }
             if (amount > 0) {
                 collateral.safeTransferFrom(order.benefactor, dest, amount);
             }
@@ -688,11 +727,25 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
         return abi.encode(order);
     }
 
+    /**
+     * @notice True iff `signature` is a valid backend-signed digest
+     *         for `order` under `orderType` AND the order is not yet
+     *         expired.
+     *
+     * @dev FYP-30 patch. The previous implementation only checked the
+     *      signature recovery, so an off-chain integrator polling
+     *      {verifyOrder} would treat an expired order as still
+     *      valid — but the corresponding {mint} / {executeRedeem}
+     *      call would revert with {ExpiredOrder}. Folding the
+     *      expiry check into the view brings it in line with the
+     *      authoritative path.
+     */
     function verifyOrder(
         Order calldata order,
         bytes calldata signature,
         OrderType orderType
     ) external view returns (bool) {
+        if (block.timestamp > order.expiry) return false;
         bytes32 d = _digestFromStruct(_hashOrder(order, orderType));
         return d.recover(signature) == backendSigner;
     }
@@ -866,6 +919,11 @@ contract FypherMinting is Initializable, ReentrancyGuardUpgradeable {
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser. The pauser slot is consulted by
+        // {onlyPauserOrAdmin}, and the slot's default value 0 already
+        // means "no pauser configured". Re-setting to zero is a no-op
+        // attempt; reject explicitly so the operator sees the typo.
+        if (newPauser == address(0)) revert ZeroAddress();
         if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;

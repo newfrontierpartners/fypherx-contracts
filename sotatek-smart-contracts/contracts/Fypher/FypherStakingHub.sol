@@ -112,6 +112,11 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
     error InsufficientStake(uint256 have, uint256 want);
     error LengthMismatch();
     error InsufficientFpy(uint256 have, uint256 want);
+    /// @notice FYP-30: addPool refuses an underlying that equals the
+    ///         reward token — the hub would conflate user principal
+    ///         with reward inventory in the same ERC-20 balance, and
+    ///         reward payments could chew into staked principal.
+    error UnderlyingIsRewardToken();
 
     // ── Init ──
 
@@ -166,6 +171,13 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
      */
     function addPool(IERC20 underlying, uint64 weightBps) external onlyAdmin returns (uint256 poolId) {
         if (address(underlying) == address(0)) revert ZeroAddress();
+        // FYP-30: refuse to bind the pool's principal to the reward
+        // token. The hub holds reward inventory in `fpy.balanceOf
+        // (address(this))`; if user-staked principal accumulates in
+        // the same balance, {_payFpy} could pay out principal as
+        // rewards and {unstake} could fail because the reward sink
+        // already drained the principal.
+        if (address(underlying) == address(fpy)) revert UnderlyingIsRewardToken();
         // FYP-38: cache .length so the duplicate check and the settle
         // sweep share a single SLOAD.
         uint256 n = _pools.length;
@@ -232,6 +244,10 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser (silent footgun — zero is the
+        // default empty slot, re-setting to zero is almost always a
+        // typo).
+        if (newPauser == address(0)) revert ZeroAddress();
         // FYP-39: skip the SSTORE + event when the value is unchanged.
         if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);

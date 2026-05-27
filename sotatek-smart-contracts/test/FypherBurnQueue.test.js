@@ -378,15 +378,18 @@ describe("FypherBurnQueue", () => {
   });
 
   describe("admin guards", () => {
-    it("setSupportedAsset / setBurnPaused / setBackendSigner only callable by admin", async () => {
+    it("setSupportedAsset / setBurnPaused / setBackendSigner reject non-pauser / non-admin", async () => {
       const { nonAdmin, queue, usdt } = await deployFixture();
       await assert.rejects(
         queue.connect(nonAdmin).setSupportedAsset(await usdt.getAddress(), false),
         (err) => err.message.includes("NotAdmin"),
       );
+      // FYP-24: setBurnPaused is now onlyPauserOrAdmin (pauser can
+      // PAUSE; unpause is still admin-only). nonAdmin is neither, so
+      // the gate trips with NotPauserOrAdmin.
       await assert.rejects(
         queue.connect(nonAdmin).setBurnPaused(await usdt.getAddress(), true),
-        (err) => err.message.includes("NotAdmin"),
+        (err) => err.message.includes("NotPauserOrAdmin"),
       );
       await assert.rejects(
         queue.connect(nonAdmin).setBackendSigner(nonAdmin.address),

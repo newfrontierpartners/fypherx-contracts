@@ -76,6 +76,9 @@ contract StakedFYP is
     ///         Users must exit via {cooldownAssets} / {cooldownShares}
     ///         and {unstake} (or {earlyUnstake} with a fee).
     error CooldownRequired();
+    /// @notice FYP-30 / FYP-43. The user's cooldown is either ready to
+    ///         unstake (call {unstake}) or has not been started.
+    error ExistingCooldownReady();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -260,10 +263,15 @@ contract StakedFYP is
     }
 
     function _accrueCooldown(address user, uint256 assets) internal {
+        UserCooldown storage cd = cooldowns[user];
+        // FYP-43 patch. See {StakedRUSD._accrueCooldown}.
+        if (cd.underlyingAmount > 0 && block.timestamp >= cd.cooldownEnd) {
+            revert ExistingCooldownReady();
+        }
+
         uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
         uint256 newEnd = block.timestamp + cooldownDuration;
 
-        UserCooldown storage cd = cooldowns[user];
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
         require(newAmount <= type(uint152).max, "Cooldown overflow");
         cd.underlyingAmount = uint152(newAmount);
@@ -309,6 +317,14 @@ contract StakedFYP is
     function earlyUnstake(address receiver) external nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
+        // FYP-30 patch. If cooldown is already over, call {unstake} —
+        // do not pay the fee.
+        if (block.timestamp >= cd.cooldownEnd) revert ExistingCooldownReady();
+
+        // FYP-33 patch. See {StakedRUSD.earlyUnstake} for the rationale
+        // on why the vault cannot be its own fee receiver.
+        address feeReceiver = settingManagement.getFeeReceiver();
+        require(feeReceiver != address(this), "Vault cannot be its own fee receiver");
 
         uint256 assets = cd.underlyingAmount;
         uint256 fee = PoolMath.calculateFee(assets, settingManagement.getFees("earlyUnstakeFee"));
@@ -321,7 +337,7 @@ contract StakedFYP is
         require(ok1, "Silo withdraw failed");
         if (fee > 0) {
             (bool ok2,) = silo.call(
-                abi.encodeWithSignature("withdraw(address,uint256)", settingManagement.getFeeReceiver(), fee)
+                abi.encodeWithSignature("withdraw(address,uint256)", feeReceiver, fee)
             );
             require(ok2, "Silo fee withdraw failed");
         }

@@ -81,6 +81,8 @@ contract StakedAUSD is
     error RestrictedStaker(address account);
     /// @notice FYP-06: the immediate-exit ERC-4626 path is disabled.
     error CooldownRequired();
+    /// @notice FYP-30 / FYP-43. Cooldown ready or not started.
+    error ExistingCooldownReady();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -246,10 +248,15 @@ contract StakedAUSD is
     }
 
     function _accrueCooldown(address user, uint256 assets) internal {
+        UserCooldown storage cd = cooldowns[user];
+        // FYP-43 patch. See {StakedRUSD._accrueCooldown}.
+        if (cd.underlyingAmount > 0 && block.timestamp >= cd.cooldownEnd) {
+            revert ExistingCooldownReady();
+        }
+
         uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
         uint256 newEnd = block.timestamp + cooldownDuration;
 
-        UserCooldown storage cd = cooldowns[user];
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
         require(newAmount <= type(uint152).max, "Cooldown overflow");
         cd.underlyingAmount = uint152(newAmount);
@@ -286,6 +293,12 @@ contract StakedAUSD is
     function earlyUnstake(address receiver) external nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
+        // FYP-30: cooldown already over → call {unstake} instead.
+        if (block.timestamp >= cd.cooldownEnd) revert ExistingCooldownReady();
+
+        // FYP-33: vault cannot be its own fee receiver.
+        address feeReceiver = settingManagement.getFeeReceiver();
+        require(feeReceiver != address(this), "Vault cannot be its own fee receiver");
 
         uint256 assets = cd.underlyingAmount;
         uint256 fee = PoolMath.calculateFee(assets, settingManagement.getFees("earlyUnstakeFee"));
@@ -298,7 +311,7 @@ contract StakedAUSD is
         require(ok1, "Silo withdraw failed");
         if (fee > 0) {
             (bool ok2,) = silo.call(
-                abi.encodeWithSignature("withdraw(address,uint256)", settingManagement.getFeeReceiver(), fee)
+                abi.encodeWithSignature("withdraw(address,uint256)", feeReceiver, fee)
             );
             require(ok2, "Silo fee withdraw failed");
         }

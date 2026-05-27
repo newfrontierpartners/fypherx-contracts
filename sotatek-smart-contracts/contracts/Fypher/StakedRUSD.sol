@@ -121,6 +121,10 @@ contract StakedRUSD is
     ///         Users must exit via {cooldownAssets} / {cooldownShares}
     ///         and {unstake} (or {earlyUnstake} with a fee).
     error CooldownRequired();
+    /// @notice FYP-30 / FYP-43. The user's cooldown is either ready to
+    ///         unstake (call {unstake} instead of paying the early-
+    ///         exit fee) or has not been started.
+    error ExistingCooldownReady();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -415,10 +419,20 @@ contract StakedRUSD is
      *         end, `now + cooldownDuration`).
      */
     function _accrueCooldown(address user, uint256 assets) internal {
+        UserCooldown storage cd = cooldowns[user];
+        // FYP-43 patch. If the user has an already-claimable cooldown
+        // sitting in the silo, refuse to merge a new amount on top —
+        // doing so would push the existing balance's release date out
+        // to the new cooldownEnd, re-locking principal the user could
+        // already withdraw via {unstake}. The user must claim the
+        // ready cooldown first, then start a fresh one.
+        if (cd.underlyingAmount > 0 && block.timestamp >= cd.cooldownEnd) {
+            revert ExistingCooldownReady();
+        }
+
         uint256 cooldownDuration = settingManagement.getPoolConfigs("cooldownDuration");
         uint256 newEnd = block.timestamp + cooldownDuration;
 
-        UserCooldown storage cd = cooldowns[user];
         uint256 newAmount = uint256(cd.underlyingAmount) + assets;
         // uint152 holds ~5.7e45 — comfortably above any realistic 18-decimal
         // stake balance. Defensive cast bound for L-4.
@@ -443,9 +457,27 @@ contract StakedRUSD is
         emit Unstaked(msg.sender, receiver, assets);
     }
 
+    /**
+     * @notice Pay the configured early-unstake fee to skip the
+     *         remaining cooldown wait. Reverts if the cooldown has
+     *         already elapsed (the user should call {unstake} instead
+     *         and keep their full balance — FYP-30 patch).
+     *
+     * @dev FYP-33 patch. The fee receiver must NOT be this vault. If
+     *      it were, the fee would land on `address(this)` and
+     *      immediately appear in {totalAssets} (which reads
+     *      `balanceOf(asset) - _unvestedAmount`), bypassing the
+     *      8-hour streaming release. Operators are expected to
+     *      configure feeReceiver to a treasury / reserve address
+     *      instead.
+     */
     function earlyUnstake(address receiver) external nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
         if (cd.underlyingAmount == 0) revert NoCooldownStarted();
+        if (block.timestamp >= cd.cooldownEnd) revert ExistingCooldownReady();
+
+        address feeReceiver = settingManagement.getFeeReceiver();
+        require(feeReceiver != address(this), "Vault cannot be its own fee receiver");
 
         uint256 assets = cd.underlyingAmount;
         uint256 fee = PoolMath.calculateFee(assets, settingManagement.getFees("earlyUnstakeFee"));
@@ -454,7 +486,7 @@ contract StakedRUSD is
 
         silo.withdraw(receiver, netAssets);
         if (fee > 0) {
-            silo.withdraw(settingManagement.getFeeReceiver(), fee);
+            silo.withdraw(feeReceiver, fee);
         }
 
         emit EarlyUnstaked(msg.sender, receiver, netAssets, fee);

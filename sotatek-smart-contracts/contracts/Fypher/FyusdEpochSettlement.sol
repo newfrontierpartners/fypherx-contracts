@@ -173,6 +173,12 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
     event EpochLocked(uint256 indexed epochId, uint64 lockedAt);
     event EpochSettled(uint256 indexed epochId, uint256 fyusdMinted, uint256 totalEntitled);
     event EpochCancelled(uint256 indexed epochId, bytes32 reasonHash);
+    event CollateralSwept(
+        uint256 indexed epochId,
+        address indexed asset,
+        address indexed to,
+        uint256 amount
+    );
     event Deposited(
         uint256 indexed epochId,
         address indexed user,
@@ -211,6 +217,18 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
     error AlreadyClaimed();
     error NothingToClaim();
     error InvalidLockOffset();
+    /// @notice FYP-30: settleEpoch must not over-mint relative to the
+    ///         aggregate entitlement that {deposit} booked.
+    error ExcessSettlement(uint256 fyusdMinted, uint256 totalEntitled);
+    /// @notice FYP-30: settleEpoch must complete before the epoch's
+    ///         {endAt} expiry. Late settlements should be the
+    ///         {cancelEpoch} path instead so the contract refunds
+    ///         depositors.
+    error SettlementWindowExpired(uint64 endAt);
+    /// @notice FYP-30: openEpoch refuses to create a new epoch while
+    ///         another is still OPEN (admins should let the previous
+    ///         epoch lock first, or cancel it explicitly).
+    error AnotherEpochOpen(uint256 openEpochId);
 
     // ── Init ──
 
@@ -271,6 +289,15 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
         returns (uint256 epochId)
     {
         if (lockOffsetSeconds == 0 || lockOffsetSeconds >= durationSeconds) revert InvalidLockOffset();
+        // FYP-30: refuse to open a new epoch while the previous one
+        // is still OPEN. With multiple live OPEN epochs users can
+        // accidentally pin their deposit to the wrong one, and the
+        // off-chain scheduler that calls {openEpoch} every 12h has no
+        // safety against double-firing. The admin can {cancelEpoch}
+        // the prior epoch first if a re-open is intentional.
+        if (nextEpochId != 0 && epochs[nextEpochId].state == EpochState.OPEN) {
+            revert AnotherEpochOpen(nextEpochId);
+        }
         unchecked { epochId = ++nextEpochId; }
         uint64 openAt = uint64(block.timestamp);
         epochs[epochId] = Epoch({
@@ -306,22 +333,44 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
      *         under-settlement (Bitgo paid less than entitled) leaves a
      *         reconcilable shortfall in the audit ledger.
      */
+    /**
+     * @notice Settle a LOCKED epoch with the FYUSD amount Bitgo confirmed.
+     *
+     * @dev FYP-30 patch. Three input validations added:
+     *      (a) `fyusdMinted > 0` — a zero-value settle would advance
+     *          the state machine to SETTLED with no on-chain payout
+     *          and no recovery path (claim() would set claimed=true
+     *          but pay 0, and {cancelEpoch} no longer accepts SETTLED).
+     *          Bitgo failures should go through {cancelEpoch} instead.
+     *      (b) `fyusdMinted <= totalFyusdEntitled` — over-minting
+     *          would create FYUSD beyond the aggregate user
+     *          entitlement, breaking the "RUSD totalSupply <= backing"
+     *          analogue invariant for FYUSD. Under-settle is allowed
+     *          (per-claim pro-rata math handles the shortfall) but
+     *          over-settle is rejected.
+     *      (c) `block.timestamp <= endAt` — late settlements must be
+     *          {cancelEpoch}'d instead so depositors can recover their
+     *          collateral.
+     */
     function settleEpoch(uint256 epochId, uint256 fyusdMinted)
         external
         onlyExecutor
         nonReentrant
     {
         if (settlementPaused) revert SettlementPausedErr();
+        if (fyusdMinted == 0) revert ZeroAmount();
         Epoch storage e = epochs[epochId];
         if (e.state == EpochState.NONE) revert EpochNotFound(epochId);
         if (e.state != EpochState.LOCKED) revert InvalidState(EpochState.LOCKED, e.state);
+        if (block.timestamp > e.endAt) revert SettlementWindowExpired(e.endAt);
+        if (fyusdMinted > e.totalFyusdEntitled) {
+            revert ExcessSettlement(fyusdMinted, e.totalFyusdEntitled);
+        }
 
         e.state = EpochState.SETTLED;
         e.fyusdMinted = fyusdMinted;
 
-        if (fyusdMinted > 0) {
-            fyusd.mint(address(this), fyusdMinted);
-        }
+        fyusd.mint(address(this), fyusdMinted);
         emit EpochSettled(epochId, fyusdMinted, e.totalFyusdEntitled);
     }
 
@@ -341,6 +390,56 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
         }
         e.state = EpochState.CANCELLED;
         emit EpochCancelled(epochId, reasonHash);
+    }
+
+    /**
+     * @notice Sweep `amount` of `asset` out of the contract into `to`.
+     *         Admin-only and restricted to SETTLED or DISTRIBUTED epochs
+     *         so the path cannot interfere with a CANCELLED epoch's
+     *         collateral refund flow (which {claim} pays from the same
+     *         balances).
+     *
+     * @dev FYP-23 patch. Before this entry-point, every collateral
+     *      asset deposited during an epoch's OPEN window stayed in the
+     *      contract permanently after settlement: {settleEpoch} only
+     *      minted FYUSD to the contract for later {claim} distribution,
+     *      and {cancelEpoch} rejected SETTLED epochs. There was no
+     *      on-chain path to forward the collateral to the treasury /
+     *      Bitgo wallet / executor that funds {FyusdEpochRedemption}.
+     *
+     *      The sweep is intentionally manual + per-(asset, amount):
+     *      multi-asset epochs are supported (each user pins a single
+     *      asset per deposit, but different users in the same epoch
+     *      can pin different assets), so a one-shot auto-sweep at
+     *      settle time would need to iterate every depositor to know
+     *      which assets to drain. Manual per-call sweep keeps the
+     *      logic linear in operator cost and makes the destination
+     *      explicit in the audit ledger (see {CollateralSwept}).
+     *
+     *      Restricted to SETTLED / DISTRIBUTED:
+     *        - OPEN  : users still depositing, balances are not yet
+     *                  fully booked.
+     *        - LOCKED: Bitgo settlement in flight, no on-chain decision
+     *                  yet.
+     *        - CANCELLED: {claim} refunds the user's original
+     *                  {depositedAmount} of {depositedAsset} from this
+     *                  balance — a sweep here would short-pay refunds.
+     */
+    function sweepCollateral(
+        uint256 epochId,
+        address asset,
+        address to,
+        uint256 amount
+    ) external onlyAdmin {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        Epoch storage e = epochs[epochId];
+        if (e.state == EpochState.NONE) revert EpochNotFound(epochId);
+        if (e.state != EpochState.SETTLED && e.state != EpochState.DISTRIBUTED) {
+            revert InvalidState(EpochState.SETTLED, e.state);
+        }
+        IERC20(asset).safeTransfer(to, amount);
+        emit CollateralSwept(epochId, asset, to, amount);
     }
 
     // ── Deposit ──
@@ -497,6 +596,8 @@ contract FyusdEpochSettlement is Initializable, ReentrancyGuardUpgradeable {
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser.
+        if (newPauser == address(0)) revert ZeroAddress();
         if (newPauser == pauserRole) return;
         emit PauserRoleUpdated(pauserRole, newPauser);
         pauserRole = newPauser;

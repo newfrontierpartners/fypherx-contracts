@@ -111,6 +111,26 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     ///         vault must hold for outstanding tickets.
     mapping(address => uint256) public outstandingLiability;
 
+    // ── Storage append (FYP-24 patch — APPEND-ONLY for proxy safety) ──
+    /**
+     * @notice ADR-007 §"Pauser carve-out". Latency-critical role that
+     *         can only call {setBurnPaused(asset, true)} (the
+     *         {pauseRole} can pause but not unpause; unpausing is
+     *         admin-only). Empty by default — admin must call
+     *         {setPauserRole} after deploy, typically pointing at
+     *         the {FypherCircuitBreaker} so its watchdog-triggered
+     *         {trip} flow can halt burn intake without waiting on
+     *         multisig.
+     *
+     * @dev Before this slot existed, {FypherBurnQueue.setBurnPaused}
+     *      was {onlyAdmin}, so the breaker could not pause burn
+     *      requests even though its NatSpec listed BurnQueue as a
+     *      target (FYP-24). The fix mirrors the pauserRole pattern
+     *      already used by FypherMinting, FypherStakingHub, and the
+     *      epoch contracts.
+     */
+    address public pauserRole;
+
     // ── Events ──
 
     event BurnRequested(
@@ -140,10 +160,13 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     event CollateralAssetSet(address indexed asset, bool supported);
     event BurnPausedSet(address indexed asset, bool paused);
     event BackendSignerUpdated(address indexed oldSigner, address indexed newSigner);
+    event PauserRoleUpdated(address indexed oldPauser, address indexed newPauser);
+    event SurplusSwept(address indexed asset, address indexed to, uint256 amount);
 
     // ── Errors ──
 
     error NotAdmin();
+    error NotPauserOrAdmin();
     error ZeroAddress();
     error ZeroAmount();
     error UnsupportedAsset();
@@ -156,6 +179,9 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     error AlreadyClaimed();
     error InsufficientLiquidity();
     error UserBlacklisted();
+    /// @notice FYP-31: requested sweep would dip below the contract's
+    ///         outstanding liability for that asset.
+    error WouldUnderfundLiability(uint256 surplus, uint256 requested);
 
     // ── Init ──
 
@@ -182,6 +208,16 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
 
     modifier onlyAdmin() {
         if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
+        _;
+    }
+
+    /// @notice FYP-24 patch. pauser EOA OR admin (multisig) can pause.
+    ///         Unpause requires admin only — enforced inside
+    ///         {setBurnPaused}.
+    modifier onlyPauserOrAdmin() {
+        if (msg.sender != pauserRole && !settingManagement.hasRole(bytes32(0), msg.sender)) {
+            revert NotPauserOrAdmin();
+        }
         _;
     }
 
@@ -298,6 +334,38 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
     }
 
     /**
+     * @notice Sweep collateral held in excess of the contract's
+     *         outstanding ticket liability for `asset` to `to`.
+     *         Admin-only. Reverts if the requested amount would dip
+     *         the contract's balance below {outstandingLiability}.
+     *
+     * @dev FYP-31 patch. Surplus accumulates when the contract is
+     *      overfunded through {topUp} (ops over-tops to be safe)
+     *      or when users send the collateral asset directly to the
+     *      contract address by mistake. Before this entry point the
+     *      surplus could only be reclaimed by an upgrade or by
+     *      walking it through {emergencyReverse} ticket-by-ticket,
+     *      both of which CertiK flagged as awkward; the comment in
+     *      {topUp} also incorrectly claimed {emergencyReverse} was
+     *      the sweep path even though that function bookkeeps the
+     *      liability counter down.
+     */
+    function sweepSurplus(address asset, address to, uint256 amount)
+        external
+        onlyAdmin
+        nonReentrant
+    {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        uint256 liability = outstandingLiability[asset];
+        uint256 surplus = bal > liability ? bal - liability : 0;
+        if (surplus < amount) revert WouldUnderfundLiability(surplus, amount);
+        IERC20(asset).safeTransfer(to, amount);
+        emit SurplusSwept(asset, to, amount);
+    }
+
+    /**
      * @notice Multisig escape: cancel a ticket without claim. Sends the
      *         locked collateral somewhere else (typically back to
      *         FypherMinting or ReservePool). Does NOT re-mint RUSD — that
@@ -340,7 +408,25 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
         emit CollateralAssetSet(asset, supported);
     }
 
-    function setBurnPaused(address asset, bool paused) external onlyAdmin {
+    /**
+     * @notice Per-asset burn pause. Mirrors the
+     *         {FypherMinting.setMintPaused} authorisation pattern:
+     *         pauser OR admin can PAUSE, but only admin can UNPAUSE
+     *         (ADR-007 asymmetric authorisation — default to "stop"
+     *         under operational uncertainty).
+     *
+     * @dev FYP-24 patch. Pre-patch this function was {onlyAdmin}, so
+     *      {FypherCircuitBreaker.trip} could not pause this contract
+     *      even though the breaker's NatSpec listed BurnQueue as a
+     *      target — every {trip} that hit a BurnQueue subcall reverted
+     *      with NotAdmin. The watchdog can now pause without waiting
+     *      on multisig.
+     */
+    function setBurnPaused(address asset, bool paused) external onlyPauserOrAdmin {
+        if (!paused) {
+            // Unpause requires admin (multisig) only.
+            if (!settingManagement.hasRole(bytes32(0), msg.sender)) revert NotAdmin();
+        }
         if (burnPaused[asset] == paused) return;
         burnPaused[asset] = paused;
         emit BurnPausedSet(asset, paused);
@@ -351,6 +437,19 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
         if (newSigner == backendSigner) return;
         emit BackendSignerUpdated(backendSigner, newSigner);
         backendSigner = newSigner;
+    }
+
+    /**
+     * @notice Set the pauser role. Typically the FypherCircuitBreaker
+     *         address so its trip flow can pause burn intake on a
+     *         watchdog signal. FYP-24 patch.
+     */
+    function setPauserRole(address newPauser) external onlyAdmin {
+        // FYP-25: reject zero pauser.
+        if (newPauser == address(0)) revert ZeroAddress();
+        if (newPauser == pauserRole) return;
+        emit PauserRoleUpdated(pauserRole, newPauser);
+        pauserRole = newPauser;
     }
 
     // ── View ──
