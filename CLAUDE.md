@@ -80,7 +80,7 @@ Configured in `sotatek-smart-contracts/hardhat.config.js`:
 | Network | URL | Notes |
 |---|---|---|
 | `sepolia` | `https://ethereum-sepolia-rpc.publicnode.com` (chainId 11155111) | Production target for Phase 1 alpha (migrated 2026-04-30). Address registry: `addresses/11155111.json`. |
-| `hoodi` | `https://ethereum-hoodi-rpc.publicnode.com` (chainId 560048) | FYUSD ↔ Concrete integration testnet — Concrete deployed FYUSD on HOODI directly because they don't support Sepolia for partner stable-vault flows. Concrete's FYUSD: `0xd1bbd247Be78C68cDEB8486744bD4513e62025e6`. Address registry: `addresses/560048.json`. |
+| `hoodi` | `https://ethereum-hoodi-rpc.publicnode.com` (chainId 560048) | FYUSD ↔ Concrete integration testnet — Concrete deployed FYUSD on HOODI directly because they don't support Sepolia for partner stable-vault flows. Concrete's FYUSD: `0xd1bbd247Be78C68cDEB8486744bD4513e62025e6`. Address registry: `addresses/560048.json`. **The dev-cluster backend + customer frontend (`fypherx-frontend/src/config/wagmi.ts` is HOODI-only) currently run against this chain**; Sepolia stays the audit/reference deploy. |
 | `bscTestnet` | `https://data-seed-prebsc-1-s1.binance.org:8545` (chainId 97) | Legacy — pre-2026-04-30 deployment, no longer the active target |
 | `hardhat` (in-memory) | n/a | Tests run here |
 
