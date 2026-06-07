@@ -243,10 +243,16 @@ contract RUSDYieldVault is
     ///      adapter withdraw.
     function _exitToCooldown(address user, uint256 assets, uint256 shares) internal {
         _burn(user, shares);
-        uint256 received = adapter.withdraw(assets);
+        // FYP-74: trust the vault's own measured balance delta over the
+        // adapter's self-reported return value, so a short/misbehaving adapter
+        // cannot over-report what it actually delivered to the vault.
+        IERC20 underlying = IERC20(asset());
+        uint256 balBefore = underlying.balanceOf(address(this));
+        adapter.withdraw(assets);
+        uint256 received = underlying.balanceOf(address(this)) - balBefore;
         if (received < assets) revert AdapterReturnedShort(assets, received);
 
-        IERC20(asset()).safeTransfer(address(silo), received);
+        underlying.safeTransfer(address(silo), received);
         _accrueCooldown(user, received);
     }
 

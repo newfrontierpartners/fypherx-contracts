@@ -12,6 +12,15 @@ import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "../libraries/PoolMath.sol";
 
+/// @dev FYP-73 — minimal typed view of the cooldown silo so withdrawals use a
+///      high-level call (matching {StakedRUSD}). A high-level call reverts if
+///      `silo` is ever mis-set to an EOA (Solidity inserts an extcodesize
+///      check), unlike the prior low-level `silo.call(...)` which would
+///      silently report success against an account with no code.
+interface IFypherCooldownSilo {
+    function withdraw(address to, uint256 amount) external;
+}
+
 /**
  * @title StakedAUSD (stAUSD / sFYUSD)
  * @notice ERC4626 vault for FYUSD staking. Underlying asset = FYUSD.
@@ -281,10 +290,8 @@ contract StakedAUSD is
         uint256 assets = cd.underlyingAmount;
         delete cooldowns[msg.sender];
 
-        (bool success,) = silo.call(
-            abi.encodeWithSignature("withdraw(address,uint256)", receiver, assets)
-        );
-        require(success, "Silo withdraw failed");
+        // FYP-73: high-level typed silo call (reverts if silo has no code).
+        IFypherCooldownSilo(silo).withdraw(receiver, assets);
 
         emit Unstaked(msg.sender, receiver, assets);
     }
@@ -311,15 +318,10 @@ contract StakedAUSD is
         uint256 netAssets = assets - fee;
         delete cooldowns[msg.sender];
 
-        (bool ok1,) = silo.call(
-            abi.encodeWithSignature("withdraw(address,uint256)", receiver, netAssets)
-        );
-        require(ok1, "Silo withdraw failed");
+        // FYP-73: high-level typed silo calls (revert if silo has no code).
+        IFypherCooldownSilo(silo).withdraw(receiver, netAssets);
         if (fee > 0) {
-            (bool ok2,) = silo.call(
-                abi.encodeWithSignature("withdraw(address,uint256)", feeReceiver, fee)
-            );
-            require(ok2, "Silo fee withdraw failed");
+            IFypherCooldownSilo(silo).withdraw(feeReceiver, fee);
         }
 
         emit EarlyUnstaked(msg.sender, receiver, netAssets, fee);
