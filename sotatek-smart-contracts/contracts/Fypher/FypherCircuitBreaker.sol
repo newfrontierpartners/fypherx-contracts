@@ -131,6 +131,7 @@ contract FypherCircuitBreaker is Initializable, ReentrancyGuardUpgradeable {
         initializer
     {
         if (address(_settingManagement) == address(0)) revert ZeroAddress();
+        if (_watchdog == address(0)) revert ZeroAddress(); // FYP-25
         __ReentrancyGuard_init();
         settingManagement = _settingManagement;
         watchdog = _watchdog;

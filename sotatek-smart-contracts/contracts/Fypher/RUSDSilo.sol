@@ -34,6 +34,9 @@ contract RUSDSilo {
     address public immutable STAKING_VAULT;
 
     constructor(address _stakingVault, IERC20 _token) {
+        // FYP-25: reject zero immutables (set once at deploy). require-string
+        // (not a custom error) to avoid shadowing StakedRUSD's ZeroAddress.
+        require(_stakingVault != address(0) && address(_token) != address(0), "Silo: zero address");
         STAKING_VAULT = _stakingVault;
         TOKEN = _token;
     }

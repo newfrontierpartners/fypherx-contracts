@@ -3,7 +3,8 @@ pragma solidity ^0.8.22;
 
 interface ISettingManagement {
     function hasRole(bytes32 role, address account) external view returns (bool);
-    function getRoleAdmin(bytes32 role) external view returns (bytes32);
+    // FYP-51: getRoleAdmin removed — the implementation no longer exposes it
+    // and no caller uses it through this interface.
     function grantRole(bytes32 role, address account) external;
     function revokeRole(bytes32 role, address account) external;
     function renounceRole(bytes32 role, address account) external;

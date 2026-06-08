@@ -61,4 +61,14 @@ contract RUSD is
     function mint(address to, uint256 amount) external onlyMinter {
         _mint(to, amount);
     }
+
+    /// @notice Reverted by {renounceOwnership} — see FYP-16.
+    error RenounceDisabled();
+
+    /// @dev FYP-16: ownership renouncement is disabled (mirrors {FYP}).
+    ///      Renouncing would permanently lose owner authority (minter
+    ///      management, etc.), a non-recoverable failure mode.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
+    }
 }
