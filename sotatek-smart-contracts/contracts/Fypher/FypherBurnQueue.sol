@@ -323,9 +323,10 @@ contract FypherBurnQueue is Initializable, ReentrancyGuardUpgradeable {
      *         `FypherMinting` custodian or `ReservePool`).
      *
      *         No access control — anyone can donate liquidity. The
-     *         `outstandingLiability` mapping tracks what is owed; surplus
-     *         can be swept by admin via {emergencyReverse} or a future
-     *         dedicated sweep helper.
+     *         `outstandingLiability` mapping tracks what is owed; any
+     *         surplus above that is swept by admin via {sweepSurplus}
+     *         (FYP-31). {emergencyReverse} is NOT a surplus-sweep path —
+     *         it bookkeeps the liability counter down ticket-by-ticket.
      */
     function topUp(address asset, uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();

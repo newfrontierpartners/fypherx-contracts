@@ -202,6 +202,16 @@ contract FypherStakingHub is Initializable, ReentrancyGuardUpgradeable {
      *      window under the new (higher) `totalAllocBps`,
      *      under-paying them. Mass-update matches the pattern already
      *      used by {setFpyPerBlock}.
+     *
+     *      FYP-30 (allocation rounding): per-pool emission is
+     *      `fpyPerBlock * weightBps / totalAllocBps`. A `weightBps` small
+     *      enough that this integer division rounds to 0 simply yields no
+     *      rewards for that pool — intentional and admin-tuned. Weights are
+     *      an operational parameter (a pool can also be disabled via its
+     *      {paused} flag); no on-chain minimum is enforced because the
+     *      meaningful threshold depends on the live `fpyPerBlock` /
+     *      `totalAllocBps`, both admin-controlled. Same applies to
+     *      {setPoolWeight}.
      */
     function addPool(IERC20 underlying, uint64 weightBps) external onlyAdmin returns (uint256 poolId) {
         if (address(underlying) == address(0)) revert ZeroAddress();
