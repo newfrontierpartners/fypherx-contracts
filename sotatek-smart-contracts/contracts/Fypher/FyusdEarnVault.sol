@@ -23,14 +23,14 @@ interface IConcreteAdapterSweepable {
  * @title FyusdEarnVault (blended vFYUSD)
  * @notice The 70:30 Earn vault from PRODUCT-FLOWS §2.1 (Option C) / C-4.
  *         A **thin, ratio-agnostic, keeper-orchestrated** ERC-4626-style
- *         vault: users' USDC enters the 70:30 Earn flow, and a single
+ *         vault: users' stablecoin enters the 70:30 Earn flow, and a single
  *         fungible **vFYUSD** receipt represents the blended position:
  *
- *           - **on-chain leg (~30%)**: USDC deposited into Concrete via
+ *           - **on-chain leg (~30%)**: stablecoin deposited into Concrete via
  *             {ConcreteStableAdapter} — real, trustless collateral whose
  *             value is {adapter.totalAssets()} and grows with Concrete yield.
- *           - **off-chain leg (~70%)**: USDC converted to FYUSD held in
- *             BitGo Prime custody (BVI/LLC). Its USDC-equivalent value is
+ *           - **off-chain leg (~70%)**: stablecoin converted to FYUSD held in
+ *             BitGo Prime custody (BVI/LLC). Its stablecoin-equivalent value is
  *             tracked here as {offChainBackedAssets}, reported by the
  *             backend keeper. This leg is **custodial, not trustless** —
  *             consistent with the whole BitGo-direct model (§6-3).
@@ -50,7 +50,7 @@ interface IConcreteAdapterSweepable {
  * **pool-proportional** because vFYUSD is fungible (see {requestRedeem}).
  *
  * <p><b>Keeper-orchestrated</b>: only {keeper} (the backend hot wallet,
- * funded out of BitGo custody with the on-chain leg's USDC) may
+ * funded out of BitGo custody with the on-chain leg's stablecoin) may
  * {depositBlended}. The 70% never touches the chain. The standard ERC-4626
  * {deposit}/{mint} entry points are disabled so no one can mint vFYUSD
  * without the off-chain leg being accounted. owner/admin =
@@ -62,7 +62,7 @@ interface IConcreteAdapterSweepable {
  *     under a 14-day cooldown ({unstake} releases it). Default 14 days,
  *     tunable via the `vFyusdEarnCooldown` pool config.
  *   - off-chain leg → recorded as {offChainOwed} and emitted; the backend
- *     wires the USDC out of BitGo custody (~2h) and calls
+ *     wires the stablecoin out of BitGo custody (~2h) and calls
  *     {settleOffChainClaim} to clear the on-chain record. Funds are NEVER
  *     held by this contract for the off-chain leg.
  *
@@ -90,16 +90,16 @@ contract FyusdEarnVault is
 
     // ── Storage ──
     ISettingManagement public settingManagement;
-    /// @notice The 30%-leg adapter (ConcreteStableAdapter, underlying = USDC).
+    /// @notice The 30%-leg adapter (ConcreteStableAdapter, underlying = stablecoin).
     IConcreteAdapter public adapter;
-    /// @notice Escrow holding USDC during the on-chain leg's cooldown.
+    /// @notice Escrow holding stablecoin during the on-chain leg's cooldown.
     RUSDSilo public silo;
     address public pauserRole;
     /// @notice Backend hot wallet authorised to inject leg amounts and
     ///         report off-chain NAV. Owner (Safe) sets/rotates it.
     address public keeper;
 
-    /// @notice USDC-equivalent value of the off-chain (BitGo FYUSD) leg.
+    /// @notice stablecoin-equivalent value of the off-chain (BitGo FYUSD) leg.
     ///         Principal added on {depositBlended}, reduced on
     ///         {requestRedeem}, grown by {accrueOffChainYield}. Half of the
     ///         blended NAV. Keeper-reported (custodial trust, §6-3).
@@ -110,7 +110,7 @@ contract FyusdEarnVault is
     ///         IStakedRUSDCooldown.cooldowns.
     mapping(address => UserCooldown) public cooldowns;
 
-    /// @notice Off-chain leg amount (USDC) owed to a user after
+    /// @notice Off-chain leg amount (stablecoin) owed to a user after
     ///         {requestRedeem}, awaiting the BitGo wire. Cleared by
     ///         {settleOffChainClaim}. On-chain transparency record only —
     ///         the contract never custodies these funds.
@@ -152,7 +152,7 @@ contract FyusdEarnVault is
     );
     event OnChainCooldownStarted(address indexed user, uint256 assets, uint256 cooldownEnd);
     event Unstaked(address indexed user, address indexed receiver, uint256 assets);
-    /// @notice Backend confirmed the BitGo USDC wire for the off-chain leg.
+    /// @notice Backend confirmed the BitGo stablecoin wire for the off-chain leg.
     event OffChainClaimSettled(address indexed user, uint256 amount, bytes32 txRef);
     event SettingManagerUpdated(address indexed newManager);
     event SettingManagerProposed(address indexed newManager, uint256 eta);
@@ -186,34 +186,35 @@ contract FyusdEarnVault is
 
     /**
      * @param _settingManagement central registry (admin = Safe).
-     * @param _usdc the underlying stablecoin (USDC, 6 decimals).
-     * @param _adapter the ConcreteStableAdapter (asset MUST == _usdc).
+     * @param _stable the collateral stablecoin (USDT on testnet; USDC or USDT
+     *        in prod — 6 decimals either way, so vFYUSD is 6-dec).
+     * @param _adapter the ConcreteStableAdapter (asset MUST == _stable).
      * @param admin_ must already be the SettingManagement admin (Safe).
      */
     function initialize(
         ISettingManagement _settingManagement,
-        IERC20 _usdc,
+        IERC20 _stable,
         IConcreteAdapter _adapter,
         address admin_
     ) external initializer {
         if (address(_settingManagement) == address(0)) revert ZeroAddress();
-        if (address(_usdc) == address(0)) revert ZeroAddress();
+        if (address(_stable) == address(0)) revert ZeroAddress();
         if (address(_adapter) == address(0)) revert ZeroAddress();
         if (admin_ == address(0)) revert ZeroAddress();
-        if (_adapter.asset() != address(_usdc)) {
-            revert AdapterAssetMismatch(address(_usdc), _adapter.asset());
+        if (_adapter.asset() != address(_stable)) {
+            revert AdapterAssetMismatch(address(_stable), _adapter.asset());
         }
         if (!_settingManagement.hasRole(bytes32(0), admin_)) revert AdminMismatch(admin_);
 
         __ERC20_init("Earn FYUSD", "vFYUSD");
-        __ERC4626_init(_usdc);
+        __ERC4626_init(_stable);
         __ERC20Pausable_init();
         __ERC20Permit_init("Earn FYUSD");
         __ReentrancyGuard_init();
 
         settingManagement = _settingManagement;
         adapter = _adapter;
-        silo = new RUSDSilo(address(this), _usdc);
+        silo = new RUSDSilo(address(this), _stable);
     }
 
     // ── Modifiers ──
@@ -239,7 +240,7 @@ contract FyusdEarnVault is
     /// @notice Blended NAV = on-chain Concrete leg + off-chain BitGo leg.
     ///         The on-chain leg is trustless ({adapter.totalAssets()}); the
     ///         off-chain leg is keeper-reported ({offChainBackedAssets}).
-    ///         USDC parked in the {silo} for cooldown is excluded — it has
+    ///         stablecoin parked in the {silo} for cooldown is excluded — it has
     ///         already left the adapter and is earmarked for a redeemer.
     function totalAssets() public view override returns (uint256) {
         return adapter.totalAssets() + offChainBackedAssets;
@@ -259,12 +260,12 @@ contract FyusdEarnVault is
      *         The keeper:
      *           1. computed `concreteLegAssets` (30%) + `offChainLegAssets`
      *              (70%) from the `allocationFyusdBps` setting,
-     *           2. holds `concreteLegAssets` USDC on-chain (swept from BitGo
+     *           2. holds `concreteLegAssets` stablecoin on-chain (swept from BitGo
      *              custody) and has approved this vault for it,
-     *           3. has the off-chain leg's USDC already converted to FYUSD
+     *           3. has the off-chain leg's stablecoin already converted to FYUSD
      *              and held in BitGo custody.
      *
-     *         This call pulls the on-chain USDC, deposits it into Concrete,
+     *         This call pulls the on-chain stablecoin, deposits it into Concrete,
      *         books the off-chain leg into NAV, and mints vFYUSD for the
      *         total at the current (pre-deposit) share price.
      *
@@ -288,14 +289,14 @@ contract FyusdEarnVault is
 
         // On-chain leg → Concrete. FYP-55: reset allowance to 0 after.
         if (concreteLegAssets > 0) {
-            IERC20 usdc = IERC20(asset());
-            usdc.safeTransferFrom(msg.sender, address(this), concreteLegAssets);
-            usdc.forceApprove(address(adapter), concreteLegAssets);
+            IERC20 stable = IERC20(asset());
+            stable.safeTransferFrom(msg.sender, address(this), concreteLegAssets);
+            stable.forceApprove(address(adapter), concreteLegAssets);
             adapter.deposit(concreteLegAssets);
-            usdc.forceApprove(address(adapter), 0);
+            stable.forceApprove(address(adapter), 0);
         }
 
-        // Off-chain leg → booked into NAV (USDC is in BitGo custody).
+        // Off-chain leg → booked into NAV (stablecoin is in BitGo custody).
         if (offChainLegAssets > 0) {
             offChainBackedAssets += offChainLegAssets;
         }
@@ -392,8 +393,8 @@ contract FyusdEarnVault is
      *         the backend wires it from BitGo custody (~2h) and calls
      *         {settleOffChainClaim}.
      *
-     * @return onChainAssets USDC entering the cooldown silo.
-     * @return offChainAssets USDC owed via the BitGo wire.
+     * @return onChainAssets stablecoin entering the cooldown silo.
+     * @return offChainAssets stablecoin owed via the BitGo wire.
      */
     function requestRedeem(uint256 shares)
         external
@@ -418,13 +419,13 @@ contract FyusdEarnVault is
 
         // ── On-chain leg → silo cooldown ──
         if (onChainAssets > 0) {
-            IERC20 usdc = IERC20(asset());
-            uint256 balBefore = usdc.balanceOf(address(this));
+            IERC20 stable = IERC20(asset());
+            uint256 balBefore = stable.balanceOf(address(this));
             adapter.withdraw(onChainAssets);
             // FYP-74: trust the measured delta over the adapter's return.
-            uint256 received = usdc.balanceOf(address(this)) - balBefore;
+            uint256 received = stable.balanceOf(address(this)) - balBefore;
             if (received < onChainAssets) revert AdapterReturnedShort(onChainAssets, received);
-            usdc.safeTransfer(address(silo), received);
+            stable.safeTransfer(address(silo), received);
             _accrueCooldown(msg.sender, received);
             onChainAssets = received;
         }
@@ -483,7 +484,7 @@ contract FyusdEarnVault is
 
     /**
      * @notice Keeper clears a user's off-chain owed amount once the BitGo
-     *         USDC wire is confirmed. `txRef` is the off-chain settlement
+     *         stablecoin wire is confirmed. `txRef` is the off-chain settlement
      *         reference (BitGo order id / tx hash) for the audit trail.
      *         Pure bookkeeping — no funds move on-chain.
      */

@@ -12,25 +12,25 @@ import "./IConcreteAdapter.sol";
  * @notice The 30%-leg adapter for the 70:30 Earn flow (PRODUCT-FLOWS
  *         §6-1 / C-5). Binds {IConcreteAdapter} against a Concrete
  *         (concrete.xyz) Earn V2 ERC-4626 vault whose underlying is a
- *         **stablecoin (USDC)** — NOT FYUSD.
+ *         **stablecoin (USDT/USDC)** — NOT FYUSD.
  *
  *         This is the sister contract to {ConcreteAdapterV1}: same
  *         single-tenant, internally-accounted share model, but the
  *         underlying asset is the raw collateral stablecoin so the Earn
- *         30% leg can deposit USDC straight into Concrete with **no FYUSD
+ *         30% leg can deposit USDT/USDC straight into Concrete with **no FYUSD
  *         conversion** (the whole point of the §6-1 "stablecoin direct"
  *         decision — avoids a BitGo round-trip for the on-chain leg).
  *
  *         <pre>
  *           Keeper → FyusdEarnVault.depositBlended(...)            // 30% leg only
- *                  → ConcreteStableAdapter.deposit(usdcAmount)     // this contract
- *                      → concreteVault.deposit(usdcAmount, this)   // Concrete Earn V2 (USDC)
+ *                  → ConcreteStableAdapter.deposit(stableAmount)     // this contract
+ *                      → concreteVault.deposit(stableAmount, this)   // Concrete Earn V2 (USDT/USDC)
  *         </pre>
  *
  * <p><b>Why a distinct contract rather than reusing ConcreteAdapterV1</b>:
  * the adapter↔Concrete-vault asset binding is immutable and checked at
  * construction (`concreteVault.asset() == stable`). ConcreteAdapterV1 is
- * bound to a FYUSD Concrete vault; the Earn 30% leg needs a USDC Concrete
+ * bound to a FYUSD Concrete vault; the Earn 30% leg needs a USDT/USDC Concrete
  * vault. Different underlying ⇒ different deployed instance. The interface
  * ({IConcreteAdapter}) is identical so {FyusdEarnVault} can hold either.
  *
@@ -41,10 +41,10 @@ import "./IConcreteAdapter.sol";
  * not the raw `balanceOf`, so a direct share transfer cannot distort vault
  * share pricing. Excess is recoverable through {sweepConcreteShares}.
  *
- * <p><b>Withdrawal mode assumption</b>: assumes Concrete's USDC vault is in
+ * <p><b>Withdrawal mode assumption</b>: assumes Concrete's USDT/USDC vault is in
  * <i>standard</i> (atomic ERC-4626) mode, exactly like ConcreteAdapterV1.
  * If Concrete configures it in <i>async</i> mode (epoch-batched withdrawal
- * queue), {withdraw} returns at the EVM layer but USDC does not arrive
+ * queue), {withdraw} returns at the EVM layer but USDT/USDC does not arrive
  * until Concrete processes the next epoch; the upstream
  * {FyusdEarnVault}'s balance-delta guard catches the shortfall. A v2
  * adapter speaking the async API (`processEpoch`/`claimWithdrawal`) is the
@@ -61,12 +61,12 @@ import "./IConcreteAdapter.sol";
 contract ConcreteStableAdapter is IConcreteAdapter {
     using SafeERC20 for IERC20;
 
-    /// @notice The underlying stablecoin (USDC). Set at construction;
+    /// @notice The underlying stablecoin (USDT/USDC). Set at construction;
     ///         immutable. MUST equal {IERC4626.asset} on the Concrete
     ///         vault — checked in the constructor, reverts on mismatch.
     IERC20 public immutable stable;
 
-    /// @notice The Concrete Earn V2 ERC-4626 vault (USDC) we delegate
+    /// @notice The Concrete Earn V2 ERC-4626 vault (USDT/USDC) we delegate
     ///         yield generation to. Owned + curated by Concrete; we are an LP.
     IERC4626 public immutable concreteVault;
 
@@ -159,7 +159,7 @@ contract ConcreteStableAdapter is IConcreteAdapter {
     }
 
     /// @inheritdoc IConcreteAdapter
-    /// @dev Pulls {amount} USDC from {msg.sender} (the bound vault),
+    /// @dev Pulls {amount} USDT/USDC from {msg.sender} (the bound vault),
     ///      forwards to Concrete's vault, mints adapter shares to
     ///      msg.sender. First deposit (totalShares == 0) bootstraps 1:1;
     ///      thereafter shares = amount * totalShares / totalAssets, which
@@ -180,7 +180,7 @@ contract ConcreteStableAdapter is IConcreteAdapter {
         // Concrete-share delta so {accountedConcreteShares} (not raw
         // balanceOf) backs totalAssets. FYP-55: reset allowance to 0 after
         // the deposit so an upstream vault that under-consumes the approval
-        // cannot pull additional USDC on a later call.
+        // cannot pull additional USDT/USDC on a later call.
         uint256 cBefore = concreteVault.balanceOf(address(this));
         stable.forceApprove(address(concreteVault), amount);
         concreteVault.deposit(amount, address(this));
@@ -201,7 +201,7 @@ contract ConcreteStableAdapter is IConcreteAdapter {
     ///      burn (`ceildiv(amount * totalShares, totalAssets)`) internally
     ///      so the upstream vault stays the single source of share
     ///      accounting. Concrete's {IERC4626.withdraw} burns enough
-    ///      Concrete shares to release the requested USDC; we set
+    ///      Concrete shares to release the requested USDT/USDC; we set
     ///      {receiver} = msg.sender so the vault sees the asset land.
     function withdraw(uint256 stableAmount) external onlyVault returns (uint256) {
         if (stableAmount == 0) revert ZeroAmount();
