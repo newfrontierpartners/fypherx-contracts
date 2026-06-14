@@ -107,5 +107,8 @@
         "borrowCap": "0"
       }
     }
-  }
+  },
+  "FyusdEarnVault": "0x1EB4a282F6a1E4aA9c8FCf12BDF7BDEca4676c69",
+  "ConcreteStableAdapter": "0x148D7e05135fDd6827685800239C4a3d64bE1E01",
+  "ConcreteUsdcVault": "0x970b36501775b6f5f58d7ab6e1cda3c317550cf8"
 }
