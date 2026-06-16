@@ -45,6 +45,20 @@
     background:#fff;color:var(--txt);font-family:'SF Mono',ui-monospace,monospace}
   .fld input:focus,.fld select:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blueBg)}
   .fld.net select{font-weight:700}
+  .fld .steps{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:1px 0 1px}
+  .fld .steps .lab{font-size:10.5px;color:var(--mut);font-weight:600;margin-right:2px}
+  .sb{font-size:10px;font-weight:800;color:#fff;min-width:17px;height:17px;padding:0 4px;border-radius:5px;
+    display:inline-flex;align-items:center;justify-content:center;line-height:1}
+  .sb.b{background:var(--blue)} .sb.a{background:var(--amber)} .sb.g{background:var(--green)} .sb.x{background:var(--gray)}
+  .fld .hint{font-size:11px;color:var(--mut);line-height:1.55;margin-top:3px}
+  .fld .hint b{color:var(--dim);font-weight:600}
+  .fld .hint code{background:#fff;border:1px solid var(--line);border-radius:4px;padding:0 4px;color:#324}
+  .fld.req label::after{content:"필수";font-size:9.5px;font-weight:800;color:var(--blue);background:var(--blueBg);
+    border:1px solid #cbdcff;border-radius:5px;padding:1px 5px;margin-left:7px;vertical-align:middle}
+  .fld.opt label::after{content:"선택";font-size:9.5px;font-weight:800;color:var(--mut);background:var(--grayBg);
+    border:1px solid var(--line2);border-radius:5px;padding:1px 5px;margin-left:7px;vertical-align:middle}
+  .panel .sub{margin:-6px 0 16px;font-size:12px;color:var(--dim);line-height:1.7}
+  .panel .sub .sb{vertical-align:middle;margin:0 1px}
   .legend{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 18px;font-size:12.5px;color:var(--dim)}
   .legend span{display:inline-flex;align-items:center;gap:7px}
   .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
@@ -127,19 +141,66 @@
   <!-- env panel -->
   <div class="panel">
     <h3>실행 파라미터</h3>
+    <p class="sub">각 칸의 <b>색 배지 숫자 = 이 값이 실제로 쓰이는 단계 번호</b>입니다.
+      <span class="sb b">파랑</span> 1단계(배포) · <span class="sb a">주황</span> 2단계(권한 이양). 같은 값이 여러 단계에 쓰이면(예: Safe 주소는 5·6·7) 그 단계가 모두 표시됩니다 — 한 번만 채우면 해당 단계 버튼들이 공유합니다.
+      <b>채우는 순서</b>: ① 먼저 아는 값(네트워크·Safe·담보·Concrete·relayer)을 채우고 ② <b>1단계 ①번을 실행</b>하면 출력에 찍히는 <code>SettingManagement</code> 주소를 복사해 아래 칸에 붙여넣은 뒤 2·3단계를 진행합니다.</p>
     <div class="grid">
-      <div class="fld net"><label>네트워크</label>
-        <select id="network"><option value="hoodi">hoodi (테스트)</option><option value="sepolia">sepolia (테스트)</option><option value="mainnet">mainnet ⚠ 실거래</option></select></div>
-      <div class="fld"><label>Operator Safe <span class="k">OPERATOR_SAFE_ADDRESS</span></label><input id="safe" placeholder="0x…"></div>
-      <div class="fld"><label>SettingManagement <span class="k">(1단계 출력)</span></label><input id="sm" placeholder="0x…"></div>
-      <div class="fld"><label>Admin(=deployer) <span class="k">ADMIN_ADDRESS</span></label><input id="admin" placeholder="0x…"></div>
-      <div class="fld"><label>Watchdog(guardian) <span class="k">WATCHDOG_ADDRESS</span></label><input id="watchdog" placeholder="0x… (선택, 비우면 deployer)"></div>
-      <div class="fld"><label>Backend relayer <span class="k">RELAYER_ADDRESS</span></label><input id="relayer" placeholder="0x…"></div>
-      <div class="fld"><label>USDC 주소 <span class="k">STABLE(USDC)</span></label><input id="usdc" placeholder="0xA0b8…48"></div>
-      <div class="fld"><label>USDT 주소 <span class="k">STABLE(USDT)</span></label><input id="usdt" placeholder="0xdAC1…ec7"></div>
-      <div class="fld"><label>Concrete 볼트(USDC)</label><input id="concreteUsdc" placeholder="0x…"></div>
-      <div class="fld"><label>Concrete 볼트(USDT)</label><input id="concreteUsdt" placeholder="0x…"></div>
-      <div class="fld"><label>두번째 볼트 프록시(②용) <span class="k">PROXY_ADDRESSES</span></label><input id="proxy" placeholder="0x… (USDT 볼트 프록시)"></div>
+
+      <div class="fld net req"><label>네트워크</label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">1</span><span class="sb b">2</span><span class="sb b">3</span><span class="sb b">4</span><span class="sb a">5</span><span class="sb a">6</span><span class="sb a">7</span></div>
+        <select id="network"><option value="hoodi">hoodi (테스트)</option><option value="sepolia">sepolia (테스트)</option><option value="mainnet">mainnet ⚠ 실거래</option></select>
+        <div class="hint"><b>모든 단계 공통.</b> 어느 체인에 스크립트를 돌릴지. <code>mainnet</code> 선택 시 실행 직전 확인창이 뜹니다. 실제 런칭은 <b>mainnet</b>, 리허설은 <code>hoodi</code>/<code>sepolia</code>.</div></div>
+
+      <div class="fld req"><label>Operator Safe <span class="k">OPERATOR_SAFE_ADDRESS</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb a">5</span><span class="sb a">6</span><span class="sb a">7</span></div>
+        <input id="safe" placeholder="0x…">
+        <div class="hint">멀티시그 <b>Gnosis Safe 주소</b>. <code>app.safe.global</code>에서 생성 후 받은 주소(사전조건). 2단계의 권한 3종(admin·ProxyAdmin·LockRegistry owner)이 <b>전부 이 주소로</b> 넘어갑니다. 5·6·7번이 같은 값을 공유.</div></div>
+
+      <div class="fld req"><label>SettingManagement <span class="k">SETTING_MANAGEMENT_ADDRESS</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">2</span><span class="sb b">3</span></div>
+        <input id="sm" placeholder="0x… (1단계 실행 출력에서 복사)">
+        <div class="hint"><b>1단계 ①번을 실행하면 출력에 찍히는 주소</b>를 여기에 붙여넣습니다. 볼트가 admin·수수료 등을 조회하는 중앙 레지스트리. 2·3단계 볼트 배포 시 이 주소로 묶입니다.</div></div>
+
+      <div class="fld req"><label>Admin(=deployer) <span class="k">ADMIN_ADDRESS</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">2</span><span class="sb b">3</span></div>
+        <input id="admin" placeholder="0x… (배포 키의 주소)">
+        <div class="hint">배포에 쓰는 <b>deployer EOA의 주소</b>(= <code>.env</code> <code>PRIVATE_KEY</code>의 공개주소). 볼트의 <b>초기 admin</b>으로 세팅됐다가 5~7단계에서 Safe로 이전됩니다.</div></div>
+
+      <div class="fld opt"><label>Watchdog(guardian) <span class="k">WATCHDOG_ADDRESS</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">1</span></div>
+        <input id="watchdog" placeholder="0x… (비우면 deployer 사용)">
+        <div class="hint"><b>CircuitBreaker의 긴급 pause 권한</b>을 가질 주소. 비우면 deployer가 들어갑니다(나중에 변경 가능). 1단계에서만 사용.</div></div>
+
+      <div class="fld req"><label>Backend relayer <span class="k">RELAYER_ADDRESS</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">4</span></div>
+        <input id="relayer" placeholder="0x… (백엔드 핫월렛)">
+        <div class="hint">백엔드 키퍼 <b>핫월렛</b> 주소. LockRegistry의 <code>locker</code>(락 기록) 권한을 받습니다. owner를 Safe로 넘긴 뒤에도 이 권한은 유지돼 자금경로를 막지 않습니다. 4단계에서만 사용.</div></div>
+
+      <div class="fld req"><label>USDC 주소 <span class="k">STABLE_ADDRESS (USDC)</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">2</span></div>
+        <input id="usdc" placeholder="0xA0b8…48">
+        <div class="hint">USDC 담보 토큰 컨트랙트 주소(6-dec). mainnet은 <code>0xA0b8…eB48</code>. 2단계(USDC 볼트)에서 <code>STABLE_ADDRESS</code>로 전달됩니다.</div></div>
+
+      <div class="fld req"><label>USDT 주소 <span class="k">STABLE_ADDRESS (USDT)</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">3</span></div>
+        <input id="usdt" placeholder="0xdAC1…ec7">
+        <div class="hint">USDT 담보 토큰 주소(6-dec). mainnet은 <code>0xdAC1…1ec7</code>. 3단계(USDT 볼트)에서 같은 <code>STABLE_ADDRESS</code> 자리로 전달됩니다.</div></div>
+
+      <div class="fld req"><label>Concrete 볼트 (USDC) <span class="k">CONCRETE_VAULT_ADDRESS</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">2</span></div>
+        <input id="concreteUsdc" placeholder="0x…">
+        <div class="hint">Concrete의 <b>USDC ERC-4626 볼트</b> 주소. 30%가 여기로 입금됩니다. <code>asset()</code>이 위 USDC와 일치하는지 확인. 2단계에서만 사용.</div></div>
+
+      <div class="fld req"><label>Concrete 볼트 (USDT) <span class="k">CONCRETE_VAULT_ADDRESS</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb b">3</span></div>
+        <input id="concreteUsdt" placeholder="0x…">
+        <div class="hint">Concrete의 <b>USDT ERC-4626 볼트</b> 주소. <code>asset()</code>이 위 USDT와 일치하는지 확인. 3단계에서만 사용.</div></div>
+
+      <div class="fld opt"><label>두번째 볼트 프록시 <span class="k">PROXY_ADDRESSES</span></label>
+        <div class="steps"><span class="lab">쓰임</span><span class="sb a">6</span></div>
+        <input id="proxy" placeholder="0x… (3단계에서 배포된 USDT 볼트 프록시)">
+        <div class="hint">레지스트리가 볼트 키를 하나만 보관할 때, <b>6단계 ProxyAdmin 이전이 두 번째(USDT) 볼트도 포함</b>하도록 그 프록시 주소를 추가합니다. <code>3단계 출력</code>의 볼트 주소를 붙여넣으세요. 콤마로 여러 개 가능. 6단계에서만 사용.</div></div>
+
     </div>
   </div>
 
