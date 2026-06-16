@@ -10,6 +10,18 @@ module.exports = {
     },
   },
   networks: {
+    // Ethereum mainnet (chainId 1) — PROD launch target.
+    //
+    // Shares the canonical PRIVATE_KEY with sepolia/bscTestnet (NOT the
+    // HOODI key, which is deliberately segregated). Confirm before any
+    // deploy that the key + funding match mainnet ops. Default RPC is the
+    // public llamarpc endpoint; override with MAINNET_RPC_URL for a private
+    // provider (recommended for the prod deploy to avoid rate limits).
+    mainnet: {
+      url: process.env.MAINNET_RPC_URL || "https://eth.llamarpc.com",
+      chainId: 1,
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+    },
     bscTestnet: {
       url: "https://data-seed-prebsc-1-s1.binance.org:8545",
       chainId: 97,
