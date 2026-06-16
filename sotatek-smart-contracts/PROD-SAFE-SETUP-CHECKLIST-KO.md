@@ -49,7 +49,9 @@
 
 - [ ] **D-1. admin 이전 시작** — `npx hardhat run scripts/grant-admin-to-safe.js --network mainnet` (SettingManagement.transferAdmin(safe) — 되돌릴 수 있는 단계).
 - [ ] **D-2. Safe가 admin 수락** — app.safe.global(eth:`<safe>`) → New transaction → Contract interaction → `<SettingManagement>` → `acceptAdmin()` → 임계값 오너 서명 → 실행. **이 순간 Safe가 SM admin이 되고, SM.hasRole로 admin을 조회하는 모든 컨트랙트(FyusdEarnVault×2·어댑터·ReservePool·CircuitBreaker)를 자동으로 통제**.
-- [ ] **D-3. Lock Registry owner 이전** — Safe tx로 `EarnLockRegistry.setOwner(safe)`. (단, 백엔드 relayer는 `locker` 권한만 있으면 동작 — 자금경로 비차단.)
+- [ ] **D-2b. ProxyAdmin(업그레이드 권한) 이전** — `OPERATOR_SAFE_ADDRESS=0x<safe> npx hardhat run scripts/transfer-proxy-admin-to-safe.js --network mainnet` (레지스트리가 볼트 키를 하나만 보관하면 두 번째 볼트 프록시는 `PROXY_ADDRESSES=0x…`로 추가). 모든 업그레이더블 프록시(SettingManagement·CircuitBreaker·FyusdEarnVault×2)의 OZ ProxyAdmin owner를 Safe로 이전. **이게 빠지면 임시 EOA가 프록시 업그레이드 권한을 계속 보유 → 구현체를 갈아끼울 수 있어 멀티시그가 무력화됨**. (비가역 — 이후 업그레이드는 Safe만 가능.)
+- [ ] **D-3. Lock Registry owner 이전** — Safe tx로 `EarnLockRegistry.setOwner(safe)`, 또는 스크립트로: `OPERATOR_SAFE_ADDRESS=0x<safe> npx hardhat run scripts/transfer-lock-registry-owner.js --network mainnet`. (단, 백엔드 relayer는 `locker` 권한만 있으면 동작 — 자금경로 비차단.)
+- [ ] **D-4. 무권한 검증** — 임시 EOA 폐기/콜드보관 전에, deployer가 더 이상 (a) SettingManagement admin(`owner()`/`hasRole(0x0, deployer)` 둘 다 false), (b) 어느 ProxyAdmin의 owner(각 프록시 `erc1967.getAdminAddress` → 그 ProxyAdmin `owner()` == Safe), (c) EarnLockRegistry owner 가 아님을 **온체인으로 확인**. 셋 다 Safe로 넘어간 것을 확인한 뒤에만 임시 deployer 키를 폐기/콜드보관.
 
 ---
 
@@ -65,4 +67,5 @@
 
 ## 멀티시그가 통제하는 범위 (요약)
 - ✅ **거버넌스/권한 전부**: SettingManagement(admin) → 그 admin을 조회하는 FyusdEarnVault×2·어댑터·ReservePool·CircuitBreaker. + EarnLockRegistry(owner 이전). 볼트 pause/keeper/pauser·role·캡·쿨다운 등.
+- ✅ **업그레이드 권한**: 모든 업그레이더블 프록시(SettingManagement·CircuitBreaker·FyusdEarnVault×2)의 OZ ProxyAdmin owner도 Safe(D-2b). 즉 구현체 업그레이드도 멀티시그 통제 하. (이걸 빼면 admin만 넘기고 업그레이드는 EOA가 쥔 채라 위험.)
 - ⚙️ **자금경로(설계상 relayer)**: Get FYUSD 건별 발행·커스터디 hop·분배, redeem 처리 — 멀티시그는 너무 느려 fast relayer가 담당(Safe 비차단). Safe는 이 경로의 **설정/권한**만 통제.
