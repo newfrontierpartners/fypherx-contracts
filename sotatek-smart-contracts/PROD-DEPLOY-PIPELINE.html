@@ -3,212 +3,300 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PROD 배포 파이프라인 — Get FYUSD / Earn / Redeem</title>
+<title>PROD 배포 콘솔 — Get FYUSD / Earn / Redeem</title>
 <style>
   :root{
-    --bg:#0d1117; --panel:#161b22; --panel2:#1c232d; --line:#2a3340;
-    --txt:#e7eaf0; --dim:#9aa3b2; --mut:#6b7384;
-    --blue:#4f7cff; --blueBg:#13213f; --amber:#f0a93b; --amberBg:#352712;
-    --green:#34d399; --greenBg:#0f2a22; --gray:#7d8694; --grayBg:#1a1f27;
-    --code:#cbd5e1;
+    --bg:#ffffff; --panel:#f7f8fa; --panel2:#eef1f5; --line:#e2e6ec; --line2:#d4dae2;
+    --txt:#1b2330; --dim:#5b6573; --mut:#8a93a3;
+    --blue:#2f6bff; --blueBg:#eef3ff; --amber:#d9870b; --amberBg:#fdf4e3;
+    --green:#0f9d6b; --greenBg:#e9f8f1; --gray:#7d8694; --grayBg:#f1f3f6;
+    --codeBg:#0e1320; --codeTxt:#d7e0ea;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--txt);
     font-family:'Apple SD Gothic Neo','Malgun Gothic',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-    -webkit-font-smoothing:antialiased;line-height:1.5;padding:0 0 64px}
+    -webkit-font-smoothing:antialiased;line-height:1.5;padding:0 0 80px}
   code,.mono{font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace}
-  .wrap{max-width:960px;margin:0 auto;padding:0 20px}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 22px}
 
-  header.hero{background:linear-gradient(135deg,#13213f 0%,#0d1117 70%);
-    border-bottom:1px solid var(--line);padding:34px 0 26px;margin-bottom:30px}
-  .hero h1{margin:0 0 6px;font-size:25px;font-weight:800;letter-spacing:-.02em}
+  header.hero{background:linear-gradient(135deg,#eef3ff 0%,#ffffff 70%);
+    border-bottom:1px solid var(--line);padding:30px 0 24px;margin-bottom:24px}
+  .hero h1{margin:0 0 6px;font-size:24px;font-weight:800;letter-spacing:-.02em}
   .hero p{margin:0;color:var(--dim);font-size:14px}
-  .hero .tag{display:inline-block;margin-top:12px;font-size:11.5px;font-weight:700;
-    color:var(--amber);background:var(--amberBg);border:1px solid #4a3a1c;
-    padding:4px 10px;border-radius:999px}
+  .hero .row{display:flex;align-items:center;gap:12px;margin-top:14px;flex-wrap:wrap}
+  .hero .tag{font-size:11.5px;font-weight:700;color:var(--amber);background:var(--amberBg);
+    border:1px solid #f0dcb0;padding:5px 11px;border-radius:999px}
+  #conn{font-size:12px;font-weight:700;padding:5px 11px;border-radius:999px;border:1px solid var(--line2)}
+  #conn.ok{color:var(--green);background:var(--greenBg);border-color:#bce6d4}
+  #conn.bad{color:#c0392b;background:#fdecea;border-color:#f3c5bf}
 
-  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 26px;font-size:12.5px;color:var(--dim)}
+  .help{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 16px;
+    font-size:12.5px;color:var(--dim);margin-bottom:22px}
+  .help b{color:var(--txt)}
+  .help code{background:#fff;border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#324}
+
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:24px}
+  .panel h3{margin:0 0 14px;font-size:13px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--dim)}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px 18px}
+  .fld{display:flex;flex-direction:column;gap:5px}
+  .fld label{font-size:11.5px;font-weight:600;color:var(--dim)}
+  .fld label .k{font-family:'SF Mono',ui-monospace,monospace;color:var(--mut);font-weight:500}
+  .fld input,.fld select{font-size:13px;padding:8px 10px;border:1px solid var(--line2);border-radius:8px;
+    background:#fff;color:var(--txt);font-family:'SF Mono',ui-monospace,monospace}
+  .fld input:focus,.fld select:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blueBg)}
+  .fld.net select{font-weight:700}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 18px;font-size:12.5px;color:var(--dim)}
   .legend span{display:inline-flex;align-items:center;gap:7px}
   .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
 
-  /* prerequisites strip */
-  .pre{background:var(--grayBg);border:1px dashed var(--line);border-radius:14px;
-    padding:16px 18px;margin-bottom:30px}
-  .pre h3{margin:0 0 10px;font-size:13px;font-weight:700;color:var(--gray);
-    text-transform:uppercase;letter-spacing:.05em;display:flex;align-items:center;gap:8px}
-  .pre ul{margin:0;padding-left:18px;color:var(--dim);font-size:13px;columns:2;column-gap:28px}
-  .pre li{margin:4px 0;break-inside:avoid}
-  .pre .h{color:var(--txt);font-weight:600}
-
-  .phase{margin:34px 0 8px;font-size:12.5px;font-weight:800;letter-spacing:.06em;
-    text-transform:uppercase}
+  .phase{margin:30px 0 8px;font-size:12.5px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}
   .phase.p1{color:var(--blue)} .phase.p2{color:var(--amber)} .phase.p3{color:var(--green)}
 
-  /* pipeline */
   .pipe{position:relative;padding-left:38px}
-  .pipe::before{content:"";position:absolute;left:13px;top:6px;bottom:6px;width:2px;background:var(--line)}
+  .pipe::before{content:"";position:absolute;left:13px;top:8px;bottom:8px;width:2px;background:var(--line2)}
   .step{position:relative;margin:0 0 16px}
-  .step .num{position:absolute;left:-38px;top:14px;width:28px;height:28px;border-radius:50%;
-    display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;
-    color:#fff;border:3px solid var(--bg);z-index:2}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
-    padding:15px 17px;border-left:4px solid var(--line)}
+  .step .num{position:absolute;left:-38px;top:15px;width:28px;height:28px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#fff;
+    border:3px solid var(--bg);z-index:2}
+  .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:15px 17px;border-left:4px solid var(--line2);
+    box-shadow:0 1px 2px rgba(20,30,50,.04)}
   .card .top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
   .card .title{font-size:15.5px;font-weight:700}
   .card .who{font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap}
-  .who.eoa{color:var(--blue);background:var(--blueBg);border:1px solid #244}
-  .who.safe{color:var(--amber);background:var(--amberBg);border:1px solid #4a3a1c}
-  .cmd{margin:11px 0 9px;background:#0a0e14;border:1px solid var(--line);border-radius:9px;
-    padding:10px 12px;font-size:12px;color:var(--code);overflow-x:auto;white-space:pre;line-height:1.55}
-  .cmd .env{color:var(--green)} .cmd .cli{color:#9ecbff} .cmd .cmt{color:var(--mut)}
-  .out{font-size:12.5px;color:var(--dim);margin-top:7px}
+  .who.eoa{color:var(--blue);background:var(--blueBg);border:1px solid #cbdcff}
+  .out{font-size:12.5px;color:var(--dim);margin:9px 0 0}
   .out b{color:var(--txt);font-weight:600}
-  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
-  .chip{font-size:11px;color:var(--dim);background:var(--panel2);border:1px solid var(--line);
-    border-radius:7px;padding:3px 8px;font-family:'SF Mono',ui-monospace,monospace}
+  .runrow{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}
+  .btn{font-size:13px;font-weight:700;padding:9px 18px;border-radius:9px;border:none;cursor:pointer;
+    color:#fff;background:var(--blue);display:inline-flex;align-items:center;gap:7px}
+  .btn:hover{filter:brightness(1.05)} .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.amber{background:var(--amber)} .btn.ghost{background:#fff;color:var(--dim);border:1px solid var(--line2)}
+  .needs{font-size:11.5px;color:var(--mut)}
+  .needs code{font-family:'SF Mono',ui-monospace,monospace}
+  .term{margin-top:11px;background:var(--codeBg);color:var(--codeTxt);border-radius:10px;padding:12px 13px;
+    font-family:'SF Mono',ui-monospace,monospace;font-size:11.5px;line-height:1.55;white-space:pre-wrap;
+    word-break:break-word;max-height:340px;overflow:auto;display:none}
+  .term.show{display:block}
+  .term .err{color:#ff8d7a}
 
   .step.blue .num{background:var(--blue)} .step.blue .card{border-left-color:var(--blue)}
   .step.amber .num{background:var(--amber)} .step.amber .card{border-left-color:var(--amber)}
   .step.green .num{background:var(--green)} .step.green .card{border-left-color:var(--green)}
 
-  /* manual gate */
   .gate{position:relative;margin:0 0 16px}
-  .gate .num{position:absolute;left:-38px;top:13px;width:28px;height:28px;border-radius:50%;
-    display:flex;align-items:center;justify-content:center;font-size:14px;
-    color:var(--gray);background:var(--grayBg);border:2px dashed var(--gray);z-index:2}
-  .gateCard{background:repeating-linear-gradient(45deg,#1a1f27,#1a1f27 10px,#171c24 10px,#171c24 20px);
-    border:1px dashed var(--gray);border-radius:14px;padding:13px 16px}
+  .gate .num{position:absolute;left:-38px;top:14px;width:28px;height:28px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--gray);
+    background:var(--grayBg);border:2px dashed var(--gray);z-index:2}
+  .gateCard{background:repeating-linear-gradient(45deg,#f6f7f9,#f6f7f9 10px,#fff 10px,#fff 20px);
+    border:1px dashed var(--line2);border-radius:14px;padding:13px 16px}
   .gateCard .title{font-size:14px;font-weight:700;color:var(--gray)}
   .gateCard .title .m{font-size:10.5px;font-weight:800;color:#fff;background:var(--gray);
     border-radius:6px;padding:2px 7px;margin-right:9px;letter-spacing:.04em}
   .gateCard p{margin:7px 0 0;font-size:12.5px;color:var(--dim)}
+  .gateCard p b{color:var(--amber)}
 
-  .foot{margin-top:34px;padding:16px 18px;background:var(--greenBg);border:1px solid #1c4a3a;
-    border-radius:14px;font-size:13px;color:#bdead7}
-  .foot b{color:#fff}
-  .skip{margin-top:18px;font-size:12.5px;color:var(--mut)}
-  .skip b{color:var(--dim)}
+  .pre{background:var(--grayBg);border:1px dashed var(--line2);border-radius:14px;padding:15px 18px;margin-bottom:14px}
+  .pre h3{margin:0 0 9px;font-size:12.5px;font-weight:700;color:var(--gray);text-transform:uppercase;letter-spacing:.05em}
+  .pre ul{margin:0;padding-left:18px;color:var(--dim);font-size:12.5px;columns:2;column-gap:28px}
+  .pre li{margin:4px 0;break-inside:avoid}.pre .h{color:var(--txt);font-weight:600}
+  .pre code{background:#fff;border:1px solid var(--line);border-radius:4px;padding:0 5px}
+
+  .foot{margin-top:30px;padding:16px 18px;background:var(--greenBg);border:1px solid #bce6d4;border-radius:14px;
+    font-size:13px;color:#0c6b49}.foot b{color:#084]}
+  .skip{margin-top:16px;font-size:12px;color:var(--mut)}.skip b{color:var(--dim)}
+  .skip code{font-family:'SF Mono',ui-monospace,monospace}
 </style>
 </head>
 <body>
 <header class="hero"><div class="wrap">
-  <h1>PROD 배포 파이프라인 — Get FYUSD / Earn / Redeem</h1>
-  <p>Ethereum mainnet (chainId 1) · 담보 USDC·USDT · epoch / FYUSD 토큰 컨트랙트 제외(FYUSD = BitGo 발행)</p>
-  <span class="tag">임시 deployer EOA로 전부 배포 → 3종 권한을 Gnosis Safe로 이양 → EOA 폐기</span>
+  <h1>PROD 배포 콘솔 — Get FYUSD / Earn / Redeem</h1>
+  <p>Ethereum mainnet (chainId 1) · 담보 USDC·USDT · epoch / FYUSD 토큰 제외(FYUSD = BitGo 발행)</p>
+  <div class="row">
+    <span class="tag">임시 deployer EOA로 배포 → 권한 3종을 Gnosis Safe로 이양 → EOA 폐기</span>
+    <span id="conn" class="bad">● 서버 연결 안 됨</span>
+  </div>
 </div></header>
 
 <div class="wrap">
 
+  <div class="help">
+    <b>실행 방법:</b> 이 폴더에서 <code>node deploy-console-server.js</code> 를 켠 뒤 <code>http://127.0.0.1:8899</code> 로 접속하세요.
+    각 단계의 <b>▶ 실행</b> 버튼이 해당 hardhat 스크립트를 돌리고 출력을 실시간으로 보여줍니다. <code>.env</code> 의 <code>PRIVATE_KEY</code>(deployer)·<code>MAINNET_RPC_URL</code>·<code>ETHERSCAN_API_KEY</code> 는 서버가 그대로 사용합니다 — 키는 이 화면에 넣지 않습니다.
+  </div>
+
+  <!-- env panel -->
+  <div class="panel">
+    <h3>실행 파라미터</h3>
+    <div class="grid">
+      <div class="fld net"><label>네트워크</label>
+        <select id="network"><option value="hoodi">hoodi (테스트)</option><option value="sepolia">sepolia (테스트)</option><option value="mainnet">mainnet ⚠ 실거래</option></select></div>
+      <div class="fld"><label>Operator Safe <span class="k">OPERATOR_SAFE_ADDRESS</span></label><input id="safe" placeholder="0x…"></div>
+      <div class="fld"><label>SettingManagement <span class="k">(1단계 출력)</span></label><input id="sm" placeholder="0x…"></div>
+      <div class="fld"><label>Admin(=deployer) <span class="k">ADMIN_ADDRESS</span></label><input id="admin" placeholder="0x…"></div>
+      <div class="fld"><label>Watchdog(guardian) <span class="k">WATCHDOG_ADDRESS</span></label><input id="watchdog" placeholder="0x… (선택, 비우면 deployer)"></div>
+      <div class="fld"><label>Backend relayer <span class="k">RELAYER_ADDRESS</span></label><input id="relayer" placeholder="0x…"></div>
+      <div class="fld"><label>USDC 주소 <span class="k">STABLE(USDC)</span></label><input id="usdc" placeholder="0xA0b8…48"></div>
+      <div class="fld"><label>USDT 주소 <span class="k">STABLE(USDT)</span></label><input id="usdt" placeholder="0xdAC1…ec7"></div>
+      <div class="fld"><label>Concrete 볼트(USDC)</label><input id="concreteUsdc" placeholder="0x…"></div>
+      <div class="fld"><label>Concrete 볼트(USDT)</label><input id="concreteUsdt" placeholder="0x…"></div>
+      <div class="fld"><label>두번째 볼트 프록시(②용) <span class="k">PROXY_ADDRESSES</span></label><input id="proxy" placeholder="0x… (USDT 볼트 프록시)"></div>
+    </div>
+  </div>
+
   <div class="legend">
-    <span><i class="dot" style="background:var(--blue)"></i> 배포 (deployer EOA가 실행)</span>
-    <span><i class="dot" style="background:var(--amber)"></i> 권한 이양 (deployer EOA가 실행)</span>
+    <span><i class="dot" style="background:var(--blue)"></i> 배포 (deployer EOA)</span>
+    <span><i class="dot" style="background:var(--amber)"></i> 권한 이양 (deployer EOA)</span>
     <span><i class="dot" style="background:var(--green)"></i> 검증/마무리</span>
     <span><i class="dot" style="background:var(--gray)"></i> 수동 게이트 (Safe UI — 1곳)</span>
   </div>
 
   <div class="pre">
-    <h3>⏸ 사전 조건 (수동 — 배포 전에 끝나 있어야 함, 파이프라인에서 제외)</h3>
+    <h3>⏸ 사전 조건 (수동 — 배포 전에 완료)</h3>
     <ul>
-      <li><span class="h">Gnosis Safe 생성·배선</span> — app.safe.global, 오너/임계값(3-of-5), <code>OPERATOR_SAFE_ADDRESS</code></li>
-      <li><span class="h">.env</span> — 펀딩된 <code>PRIVATE_KEY</code>, <code>ETHERSCAN_API_KEY</code>, <code>MAINNET_RPC_URL</code></li>
-      <li><span class="h">담보 주소</span> — USDC / USDT (mainnet, 6-dec)</li>
-      <li><span class="h">Concrete 메인넷 볼트 2개</span> — USDC용·USDT용 (asset 일치)</li>
-      <li><span class="h">감사 게이트</span> — Earn 볼트/어댑터/LockRegistry 감사 완료</li>
-      <li><span class="h">guardian / relayer EOA</span> — watchdog · keeper · locker</li>
+      <li><span class="h">Safe 생성·배선</span> — app.safe.global, 오너/임계값(3-of-5)</li>
+      <li><span class="h">.env</span> — <code>PRIVATE_KEY</code>·<code>ETHERSCAN_API_KEY</code>·<code>MAINNET_RPC_URL</code></li>
+      <li><span class="h">deployer ETH 펀딩</span> — 약 8개 배포 + admin tx</li>
+      <li><span class="h">Concrete 볼트 2개</span> — USDC·USDT (asset 일치)</li>
+      <li><span class="h">감사 게이트</span> — Earn 볼트/어댑터/LockRegistry</li>
+      <li><span class="h">guardian / relayer EOA</span> — watchdog·keeper·locker</li>
     </ul>
   </div>
 
   <!-- PHASE 1 -->
-  <div class="phase p1">1단계 · 배포 — 모두 deployer EOA</div>
+  <div class="phase p1">1단계 · 배포 — deployer EOA</div>
   <div class="pipe">
 
     <div class="step blue"><div class="num">1</div><div class="card">
       <div class="top"><div class="title">Core 부트스트랩</div><div class="who eoa">deployer EOA</div></div>
-      <div class="cmd"><span class="env">WATCHDOG_ADDRESS</span>=0x&lt;guardian&gt; \
-npx hardhat run <span class="cli">scripts/deploy-mainnet-core.js</span> --network mainnet</div>
-      <div class="out">배포: <b>SettingManagement</b>(admin=deployer) · <b>ReservePool</b> · <b>FypherCircuitBreaker</b> + <code>setReservePool</code></div>
-      <div class="chips"><span class="chip">SettingManagement (proxy)</span><span class="chip">ReservePool</span><span class="chip">FypherCircuitBreaker (proxy)</span></div>
+      <div class="out">배포: <b>SettingManagement</b>(admin=deployer) · <b>ReservePool</b> · <b>FypherCircuitBreaker</b> + setReservePool</div>
+      <div class="runrow">
+        <button class="btn" data-script="deploy-mainnet-core.js" data-env="watchdog:WATCHDOG_ADDRESS">▶ 실행</button>
+        <span class="needs">필요: <code>WATCHDOG_ADDRESS</code>(선택)</span>
+      </div><pre class="term"></pre>
     </div></div>
 
     <div class="step blue"><div class="num">2</div><div class="card">
       <div class="top"><div class="title">Earn 볼트 + 어댑터 — USDC</div><div class="who eoa">deployer EOA</div></div>
-      <div class="cmd"><span class="env">STABLE_ADDRESS</span>=0x&lt;USDC&gt; <span class="env">CONCRETE_VAULT_ADDRESS</span>=0x&lt;Concrete USDC&gt; \
-<span class="env">SETTING_MANAGEMENT_ADDRESS</span>=0x&lt;SM&gt; <span class="env">ADMIN_ADDRESS</span>=0x&lt;deployer&gt; \
-npx hardhat run <span class="cli">scripts/deploy-fyusd-earn-vault.js</span> --network mainnet</div>
-      <div class="out">배포: <b>FyusdEarnVault(USDC)</b> = vFYUSD · <b>ConcreteStableAdapter(USDC)</b> + 볼트 initialize. <span style="color:var(--mut)">ADMIN_ADDRESS는 아직 deployer (Safe는 5단계에서 승계)</span></div>
-      <div class="chips"><span class="chip">FyusdEarnVault·USDC (proxy)</span><span class="chip">ConcreteStableAdapter·USDC</span></div>
+      <div class="out">배포: <b>FyusdEarnVault(USDC)=vFYUSD</b> · <b>ConcreteStableAdapter(USDC)</b> + initialize</div>
+      <div class="runrow">
+        <button class="btn" data-script="deploy-fyusd-earn-vault.js" data-env="usdc:STABLE_ADDRESS,concreteUsdc:CONCRETE_VAULT_ADDRESS,sm:SETTING_MANAGEMENT_ADDRESS,admin:ADMIN_ADDRESS">▶ 실행 (USDC)</button>
+        <span class="needs">필요: USDC · Concrete(USDC) · SM · Admin</span>
+      </div><pre class="term"></pre>
     </div></div>
 
     <div class="step blue"><div class="num">3</div><div class="card">
       <div class="top"><div class="title">Earn 볼트 + 어댑터 — USDT</div><div class="who eoa">deployer EOA</div></div>
-      <div class="cmd"><span class="env">STABLE_ADDRESS</span>=0x&lt;USDT&gt; <span class="env">CONCRETE_VAULT_ADDRESS</span>=0x&lt;Concrete USDT&gt; \
-<span class="env">SETTING_MANAGEMENT_ADDRESS</span>=0x&lt;SM&gt; <span class="env">ADMIN_ADDRESS</span>=0x&lt;deployer&gt; \
-npx hardhat run <span class="cli">scripts/deploy-fyusd-earn-vault.js</span> --network mainnet</div>
-      <div class="out">동일 스크립트 2회차. <b>두 번째 볼트/어댑터 주소는 따로 기록</b> (레지스트리가 같은 키를 덮어쓸 수 있음).</div>
-      <div class="chips"><span class="chip">FyusdEarnVault·USDT (proxy)</span><span class="chip">ConcreteStableAdapter·USDT</span></div>
+      <div class="out">동일 스크립트 2회차. <b>두 번째 볼트/어댑터 주소를 따로 기록</b></div>
+      <div class="runrow">
+        <button class="btn" data-script="deploy-fyusd-earn-vault.js" data-env="usdt:STABLE_ADDRESS,concreteUsdt:CONCRETE_VAULT_ADDRESS,sm:SETTING_MANAGEMENT_ADDRESS,admin:ADMIN_ADDRESS">▶ 실행 (USDT)</button>
+        <span class="needs">필요: USDT · Concrete(USDT) · SM · Admin</span>
+      </div><pre class="term"></pre>
     </div></div>
 
     <div class="step blue"><div class="num">4</div><div class="card">
       <div class="top"><div class="title">Lock Registry</div><div class="who eoa">deployer EOA</div></div>
-      <div class="cmd"><span class="env">RELAYER_ADDRESS</span>=0x&lt;backend relayer&gt; \
-npx hardhat run <span class="cli">scripts/deploy-earn-lock-registry.js</span> --network mainnet</div>
-      <div class="out">배포: <b>EarnLockRegistry</b> (owner=deployer) + relayer에 <code>locker</code> 권한 부여 (락업 30/60/90일 온체인 강제).</div>
-      <div class="chips"><span class="chip">EarnLockRegistry</span></div>
+      <div class="out">배포: <b>EarnLockRegistry</b>(owner=deployer) + relayer에 <code>locker</code> (락업 30/60/90일 온체인 강제)</div>
+      <div class="runrow">
+        <button class="btn" data-script="deploy-earn-lock-registry.js" data-env="relayer:RELAYER_ADDRESS">▶ 실행</button>
+        <span class="needs">필요: <code>RELAYER_ADDRESS</code></span>
+      </div><pre class="term"></pre>
     </div></div>
   </div>
 
   <!-- PHASE 2 -->
-  <div class="phase p2">2단계 · 권한 이양 — deployer EOA가 실행, 종착지는 Safe</div>
+  <div class="phase p2">2단계 · 권한 이양 — deployer EOA 실행, 종착지 Safe</div>
   <div class="pipe">
 
     <div class="step amber"><div class="num">5</div><div class="card">
       <div class="top"><div class="title">① SettingManagement admin 이전 (개시)</div><div class="who eoa">deployer EOA</div></div>
-      <div class="cmd"><span class="env">OPERATOR_SAFE_ADDRESS</span>=0x&lt;safe&gt; \
-npx hardhat run <span class="cli">scripts/grant-admin-to-safe.js</span> --network mainnet</div>
-      <div class="out"><code>transferAdmin(safe)</code> — <b>pendingAdmin만 설정</b>(되돌릴 수 있음). 실제 전환은 Safe가 수락해야 완료.</div>
+      <div class="out"><code>transferAdmin(safe)</code> — pendingAdmin만 설정(되돌릴 수 있음). 다음 ✋수동 단계에서 Safe가 수락해야 완료.</div>
+      <div class="runrow">
+        <button class="btn amber" data-script="grant-admin-to-safe.js" data-env="safe:OPERATOR_SAFE_ADDRESS">▶ 실행</button>
+        <span class="needs">필요: <code>OPERATOR_SAFE_ADDRESS</code></span>
+      </div><pre class="term"></pre>
     </div></div>
 
     <div class="gate"><div class="num">✋</div><div class="gateCard">
       <div class="title"><span class="m">수동</span>Safe UI — <code>acceptAdmin()</code></div>
       <p>app.safe.global (eth:&lt;safe&gt;) → Contract interaction → <code>SettingManagement.acceptAdmin()</code> → 임계값 오너 서명 → 실행.
-      <b style="color:var(--amber)">이 순간 Safe가 SM admin이 되고, SM.hasRole로 admin을 조회하는 모든 컨트랙트(Earn 볼트×2 · 어댑터 · ReservePool · CircuitBreaker)를 자동 승계.</b> (파이프라인 중 유일한 수동 단계)</p>
+      <b>이 순간 Safe가 SM admin이 되고, SM.hasRole로 admin을 조회하는 모든 컨트랙트(Earn 볼트×2·어댑터·ReservePool·CircuitBreaker)를 자동 승계.</b> (콘솔 밖 — 유일한 수동 단계)</p>
     </div></div>
 
     <div class="step amber"><div class="num">6</div><div class="card">
       <div class="top"><div class="title">② ProxyAdmin(업그레이드 권한) 이전</div><div class="who eoa">deployer EOA</div></div>
-      <div class="cmd"><span class="env">OPERATOR_SAFE_ADDRESS</span>=0x&lt;safe&gt; \
-<span class="cmt"># 두 번째 볼트 프록시가 레지스트리에 없으면:</span> <span class="env">PROXY_ADDRESSES</span>=0x&lt;vault2&gt; \
-npx hardhat run <span class="cli">scripts/transfer-proxy-admin-to-safe.js</span> --network mainnet</div>
-      <div class="out">업그레이더블 프록시(SettingManagement · Earn볼트×2 · CircuitBreaker)의 <b>ProxyAdmin 소유권 → Safe</b>.
-      <span style="color:var(--amber)">이게 빠지면 임시 EOA가 프록시 업그레이드 권한을 계속 보유 → 멀티시그 무력화.</span></div>
+      <div class="out">업그레이더블 프록시(SettingManagement·CircuitBreaker·Earn볼트×2)의 <b>ProxyAdmin 소유권 → Safe</b>. 빠지면 EOA가 업그레이드 권한 보유 → 멀티시그 무력화.</div>
+      <div class="runrow">
+        <button class="btn amber" data-script="transfer-proxy-admin-to-safe.js" data-env="safe:OPERATOR_SAFE_ADDRESS,proxy:PROXY_ADDRESSES">▶ 실행</button>
+        <span class="needs">필요: Safe · (두번째 볼트) <code>PROXY_ADDRESSES</code></span>
+      </div><pre class="term"></pre>
     </div></div>
 
     <div class="step amber"><div class="num">7</div><div class="card">
       <div class="top"><div class="title">③ Lock Registry owner 이전</div><div class="who eoa">deployer EOA</div></div>
-      <div class="cmd"><span class="env">OPERATOR_SAFE_ADDRESS</span>=0x&lt;safe&gt; \
-npx hardhat run <span class="cli">scripts/transfer-lock-registry-owner.js</span> --network mainnet</div>
-      <div class="out"><code>EarnLockRegistry.setOwner(safe)</code>. <span style="color:var(--mut)">relayer의 locker 권한은 유지(자금경로 비차단) — owner만 이동.</span></div>
+      <div class="out"><code>EarnLockRegistry.setOwner(safe)</code>. relayer의 <code>locker</code>는 유지(자금경로 비차단).</div>
+      <div class="runrow">
+        <button class="btn amber" data-script="transfer-lock-registry-owner.js" data-env="safe:OPERATOR_SAFE_ADDRESS">▶ 실행</button>
+        <span class="needs">필요: <code>OPERATOR_SAFE_ADDRESS</code></span>
+      </div><pre class="term"></pre>
     </div></div>
   </div>
 
   <!-- PHASE 3 -->
-  <div class="phase p3">3단계 · 검증 & 마무리</div>
+  <div class="phase p3">3단계 · 검증 & 마무리 (수동 확인)</div>
   <div class="pipe">
     <div class="step green"><div class="num">8</div><div class="card">
-      <div class="top"><div class="title">무권한 검증 → 임시 EOA 폐기</div><div class="who eoa">deployer EOA / 콘솔</div></div>
-      <div class="out">deployer가 더 이상 <b>(a)</b> SettingManagement admin · <b>(b)</b> 어느 ProxyAdmin의 owner · <b>(c)</b> EarnLockRegistry owner 가 <b>아님</b>을 온체인 확인 → 그제서야 임시 EOA 폐기/콜드보관.</div>
-      <div class="chips"><span class="chip">settingManagement.owner()/admin == safe</span><span class="chip">getAdminAddress(proxy).owner() == safe</span><span class="chip">lockRegistry.owner() == safe</span></div>
+      <div class="top"><div class="title">무권한 검증 → 임시 EOA 폐기</div><div class="who eoa">콘솔/Etherscan</div></div>
+      <div class="out">deployer가 더 이상 <b>(a)</b> SM admin · <b>(b)</b> 어느 ProxyAdmin owner · <b>(c)</b> EarnLockRegistry owner 가 <b>아님</b>을 온체인 확인 → 그제서야 EOA 폐기/콜드보관.</div>
     </div></div>
   </div>
 
-  <div class="foot">
-    ✅ 완료 후: <b>Safe(멀티시그)가 모든 런칭 컨트랙트의 admin·업그레이드·owner를 단독 통제</b>. 이후 운영 설정(keeper/pauser/쿨다운 등)은 어드민에서 누르면 <b>Safe Queue</b> 제안 → 오너 승인 → 실행으로 처리.
-  </div>
-
-  <div class="skip">
-    <b>파이프라인에서 제외(수동/오프체인):</b> Safe 생성 · <code>acceptAdmin()</code>(위 ✋) · Concrete의 어댑터 2개 화이트리스트 · 백엔드 env 주입(<code>FYPHERX_*</code>, BitGo 시크릿) · Etherscan verify · 배포 금지 항목(<code>deploy-mainnet.js</code>=깨짐, <code>deploy-phase1.js</code>=제외대상 배포).
-  </div>
+  <div class="foot">✅ 완료 후: <b>Safe(멀티시그)가 전 컨트랙트의 admin·업그레이드·owner를 단독 통제.</b> 이후 운영 설정(keeper/pauser/쿨다운)은 어드민에서 누르면 Safe Queue 제안 → 승인 → 실행.</div>
+  <div class="skip"><b>콘솔에서 제외(수동/오프체인):</b> Safe 생성 · <code>acceptAdmin()</code>(위 ✋) · Concrete 어댑터 화이트리스트 · 백엔드 env/BitGo 시크릿 · Etherscan verify · 배포 금지(<code>deploy-mainnet.js</code>=깨짐, <code>deploy-phase1.js</code>=제외대상).</div>
 
 </div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  // server health
+  async function ping(){
+    try{ const r = await fetch('/health'); if(r.ok){ const c=$('conn'); c.className='ok'; c.textContent='● 서버 연결됨'; return; } }catch(e){}
+    const c=$('conn'); c.className='bad'; c.textContent='● 서버 연결 안 됨 (node deploy-console-server.js)';
+  }
+  ping(); setInterval(ping, 5000);
+
+  document.querySelectorAll('.btn[data-script]').forEach(btn => {
+    btn.addEventListener('click', () => run(btn));
+  });
+
+  async function run(btn){
+    const script = btn.dataset.script;
+    const network = $('network').value;
+    // build env: "fieldId:ENV_NAME,..." → { ENV_NAME: <field value> }
+    const env = {};
+    let missing = [];
+    (btn.dataset.env || '').split(',').filter(Boolean).forEach(pair => {
+      const [fid, name] = pair.split(':');
+      const v = ($(fid)?.value || '').trim();
+      if (v) env[name] = v;
+      else if (name !== 'WATCHDOG_ADDRESS' && name !== 'PROXY_ADDRESSES') missing.push(name); // these are optional
+    });
+    const term = btn.closest('.card').querySelector('.term');
+    term.classList.add('show'); term.textContent = '';
+
+    if (missing.length){ term.innerHTML = '<span class="err">필요한 값이 비어 있습니다: '+missing.join(', ')+'</span>'; return; }
+    if (network === 'mainnet' && !confirm('⚠ MAINNET 실거래입니다.\n\n'+script+' 를 mainnet 에 실행할까요? 되돌릴 수 없습니다.')) { term.textContent='취소됨.'; return; }
+
+    btn.disabled = true; const label = btn.textContent; btn.textContent = '실행 중…';
+    try{
+      const res = await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ script, network, env }) });
+      if(!res.ok){ const t = await res.text(); term.innerHTML='<span class="err">'+t+'</span>'; return; }
+      const reader = res.body.getReader(); const dec = new TextDecoder();
+      for(;;){ const {value,done} = await reader.read(); if(done) break;
+        term.textContent += dec.decode(value, {stream:true}); term.scrollTop = term.scrollHeight; }
+    }catch(e){ term.innerHTML += '<span class="err">\n[연결 오류: '+e.message+' — 서버가 켜져 있나요?]</span>'; }
+    finally{ btn.disabled = false; btn.textContent = label; }
+  }
+</script>
 </body>
 </html>
