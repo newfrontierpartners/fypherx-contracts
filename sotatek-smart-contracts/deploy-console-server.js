@@ -47,6 +47,24 @@ const ALLOWED_ENV = new Set([
 ]);
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
+// hardhat's own dotenv loads only `.env`. The hoodi network reads its key from
+// `.env.hoodi-deployer` (HOODI_DEPLOYER_PRIVATE_KEY), which dotenv does NOT
+// auto-load — so we read these files ourselves and fill any keys the child env
+// is missing (without ever clobbering a var already set in the environment).
+function loadEnvFile(file) {
+  const out = {};
+  try {
+    const txt = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    for (const line of txt.split('\n')) {
+      if (/^\s*#/.test(line) || !line.includes('=')) continue;
+      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (m) out[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
+    }
+  } catch { /* file absent — fine */ }
+  return out;
+}
+const ENV_FILES = ['.env', '.env.hoodi-deployer'];
+
 function json(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
@@ -75,9 +93,16 @@ const server = http.createServer((req, res) => {
       if (!SCRIPTS.has(script)) return json(res, 400, { error: 'script not in allowlist' });
       if (!NETWORKS.has(network)) return json(res, 400, { error: 'network not in allowlist' });
 
-      // Build child env: inherit process.env (so PRIVATE_KEY/RPC from .env flow
-      // through hardhat) + the page's allowlisted, validated address vars.
+      // Build child env: inherit process.env, then fill any missing keys from
+      // the project env files (so HOODI_DEPLOYER_PRIVATE_KEY / PRIVATE_KEY /
+      // *_RPC_URL reach hardhat even though dotenv only loads .env), then layer
+      // the page's allowlisted, validated address vars on top.
       const childEnv = { ...process.env };
+      for (const f of ENV_FILES) {
+        for (const [k, v] of Object.entries(loadEnvFile(f))) {
+          if (childEnv[k] === undefined || childEnv[k] === '') childEnv[k] = v;
+        }
+      }
       for (const [k, v] of Object.entries(env)) {
         if (!ALLOWED_ENV.has(k) || typeof v !== 'string' || v.trim() === '') continue;
         const val = v.trim();
