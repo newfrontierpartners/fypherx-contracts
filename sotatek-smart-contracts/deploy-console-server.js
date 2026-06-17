@@ -98,11 +98,20 @@ const server = http.createServer((req, res) => {
         child = spawn('npx', ['hardhat', 'run', path.join('scripts', script), '--network', network],
           { cwd: ROOT, env: childEnv });
       } catch (e) { res.end(`[spawn failed: ${e.message}]\n`); return; }
+      let finished = false;
       child.stdout.on('data', (d) => res.write(d));
       child.stderr.on('data', (d) => res.write(d));
-      child.on('error', (e) => { res.write(`\n[spawn error: ${e.message}]\n`); res.end(); });
-      child.on('close', (code) => { res.write(`\n\n[exit code ${code}]\n`); res.end(); });
-      req.on('close', () => { try { child.kill(); } catch {} });
+      child.on('error', (e) => { finished = true; res.write(`\n[spawn error: ${e.message}]\n`); res.end(); });
+      child.on('close', (code, signal) => {
+        finished = true;
+        res.write(`\n\n[exit code ${code === null ? 'null' : code}${signal ? ' signal ' + signal : ''}]\n`);
+        res.end();
+      });
+      // Kill the child ONLY if the client actually disconnects mid-run. Use the
+      // response's 'close' (fires on real disconnect / after res.end) — NOT
+      // req's 'close', which fires as soon as the POST body is read and would
+      // SIGTERM hardhat before it prints anything (→ "exit code null").
+      res.on('close', () => { if (!finished) { try { child.kill(); } catch {} } });
     });
     return;
   }
