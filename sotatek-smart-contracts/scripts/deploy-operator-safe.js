@@ -54,11 +54,28 @@ const SAFE_SINGLETON_ABI = [
   'function setup(address[] _owners, uint256 _threshold, address to, bytes data, address fallbackHandler, address paymentToken, uint256 payment, address payable paymentReceiver)',
 ];
 
-const THRESHOLD = 2;
+// Signature threshold. Defaults to 2 (the dev 2-of-3 per ADR-012 §2);
+// override with SAFE_THRESHOLD for prod (ADR-007 calls for 3-of-5 on
+// mainnet). The owner count comes from the OWNER_*_ADDRESS env vars below;
+// THRESHOLD must be <= that count or Safe.setup reverts.
+const THRESHOLD = process.env.SAFE_THRESHOLD
+  ? Number(process.env.SAFE_THRESHOLD)
+  : 2;
+
+// Chain-aware explorer + Safe-app slug for the printed verification URLs.
+function chainLinks(chainId) {
+  switch (chainId) {
+    case 1:        return { explorer: 'https://etherscan.io',          safeSlug: 'eth' };
+    case 11155111: return { explorer: 'https://sepolia.etherscan.io',  safeSlug: 'sep' };
+    case 560048:   return { explorer: 'https://hoodi.etherscan.io',    safeSlug: 'hoodi' };
+    default:       return { explorer: 'https://etherscan.io',          safeSlug: String(chainId) };
+  }
+}
 
 async function main() {
   const [deployer] = await ethers.getSigners();
   const network = await ethers.provider.getNetwork();
+  const links   = chainLinks(Number(network.chainId));
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('Phase 1 — deploy operator Safe (ADR-012)');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -84,6 +101,17 @@ async function main() {
   const ownersSorted = [...owners]
     .map((a) => ethers.getAddress(a))
     .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+
+  // Fail fast on a misconfigured threshold rather than letting Safe.setup
+  // revert opaquely on-chain (after paying gas). NOTE: this script wires
+  // exactly three owners (OWNER_1/2/3_ADDRESS). A prod 3-of-5 needs the
+  // owner list extended to 5 env vars first — see the runbook follow-ups.
+  if (!Number.isInteger(THRESHOLD) || THRESHOLD < 1 || THRESHOLD > ownersSorted.length) {
+    throw new Error(
+      `SAFE_THRESHOLD must be an integer in [1, ${ownersSorted.length}] (owner count); got "${process.env.SAFE_THRESHOLD ?? THRESHOLD}". ` +
+      `This script wires ${ownersSorted.length} owners; to raise the owner count, extend the OWNER_*_ADDRESS list.`,
+    );
+  }
 
   const saltNonceEnv = process.env.SALT_NONCE;
   const saltNonce = saltNonceEnv
@@ -146,12 +174,12 @@ async function main() {
   console.log('  ✓ Safe deployed');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(`  Address      : ${proxyAddress}`);
-  console.log(`  Etherscan    : https://sepolia.etherscan.io/address/${proxyAddress}`);
-  console.log(`  Safe UI      : https://app.safe.global/home?safe=sep:${proxyAddress}`);
+  console.log(`  Etherscan    : ${links.explorer}/address/${proxyAddress}`);
+  console.log(`  Safe UI      : https://app.safe.global/home?safe=${links.safeSlug}:${proxyAddress}`);
   console.log('');
   console.log('  Next steps:');
   console.log('    1. Update OPERATOR_SAFE_ADDRESS in .env.dev-multisig');
-  console.log('    2. Update operatorSafe in addresses/11155111.json');
+  console.log(`    2. Record the Safe as OperatorSafe in addresses/${Number(network.chainId)}.json`);
   console.log('    3. Run scripts/grant-admin-to-safe.js to flip admin role');
   console.log('    4. Verify each owner can see the Safe in https://app.safe.global');
   console.log('');

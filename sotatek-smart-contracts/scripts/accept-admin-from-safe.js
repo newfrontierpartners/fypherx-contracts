@@ -50,7 +50,28 @@ const path = require('path');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env.dev-multisig') });
 
-const ADDRESS_REGISTRY = require('../addresses/11155111.json');
+// SettingManagement address is read from the per-chain address registry for
+// whichever network the script runs against (chainId resolved in main()).
+// Previously hard-coded to addresses/11155111.json (Sepolia only).
+//
+// NOTE: this script signs acceptAdmin() with RAW owner private keys
+// (OWNER_1/2_PRIVATE_KEY) and assumes a 2-of-3 threshold — a dev-only
+// convenience for driving the full flow from one workstation. On mainnet,
+// where the Safe owners are hardware wallets without exportable keys, run
+// Step 2 from the Safe Wallet UI instead (https://app.safe.global → the Safe
+// → New transaction → Contract interaction → SettingManagement.acceptAdmin()),
+// as printed by grant-admin-to-safe.js.
+const addresses = require('./lib/addresses');
+
+// Chain-aware explorer + Safe-app slug for the printed runbook URLs.
+function chainLinks(chainId) {
+  switch (chainId) {
+    case 1:        return { explorer: 'https://etherscan.io',          safeSlug: 'eth' };
+    case 11155111: return { explorer: 'https://sepolia.etherscan.io',  safeSlug: 'sep' };
+    case 560048:   return { explorer: 'https://hoodi.etherscan.io',    safeSlug: 'hoodi' };
+    default:       return { explorer: 'https://etherscan.io',          safeSlug: String(chainId) };
+  }
+}
 
 // Minimal Safe v1.4.1 ABI — only entries this script touches.
 const SAFE_ABI = [
@@ -72,16 +93,19 @@ const OPERATION_CALL = 0;
 async function main() {
   const provider = ethers.provider;
   const network  = await provider.getNetwork();
+  const chainId  = Number(network.chainId);
+  const links    = chainLinks(chainId);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('Phase 2.5 Step 2 — Safe accepts admin (ADR-012)');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`Network              : ${network.name} (${network.chainId})`);
+  console.log(`Network              : ${network.name} (${chainId})`);
 
   // Pull addresses + keys.
   const safeAddress     = ensure('OPERATOR_SAFE_ADDRESS');
-  const settingMgmtAddr = ADDRESS_REGISTRY.SettingManagement;
-  if (!ethers.isAddress(settingMgmtAddr)) {
-    throw new Error(`Invalid SettingManagement in addresses/11155111.json: ${settingMgmtAddr}`);
+  const registry        = addresses.load(chainId);
+  const settingMgmtAddr = registry.SettingManagement;
+  if (!settingMgmtAddr || !ethers.isAddress(settingMgmtAddr)) {
+    throw new Error(`Invalid/missing SettingManagement in addresses/${chainId}.json: ${settingMgmtAddr}`);
   }
 
   const owner1     = new ethers.Wallet(ensure('OWNER_1_PRIVATE_KEY'),               provider);
@@ -214,8 +238,8 @@ async function main() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('  ✓ Step 2 complete — Safe is now admin');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`  Etherscan tx       : https://sepolia.etherscan.io/tx/${tx.hash}`);
-  console.log(`  Safe Wallet UI     : https://app.safe.global/transactions/history?safe=sep:${safeAddress}`);
+  console.log(`  Etherscan tx       : ${links.explorer}/tx/${tx.hash}`);
+  console.log(`  Safe Wallet UI     : https://app.safe.global/transactions/history?safe=${links.safeSlug}:${safeAddress}`);
   console.log('');
   console.log('  Next steps:');
   console.log('    1. Flip FYPHERX_ADMIN_TX_MODE=safe-propose in dev k8s ConfigMap.');

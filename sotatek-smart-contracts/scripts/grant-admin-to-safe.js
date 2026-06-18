@@ -52,8 +52,22 @@ const path = require('path');
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env.dev-multisig') });
 
-// SettingManagement address read from the canonical address registry.
-const ADDRESS_REGISTRY = require('../addresses/11155111.json');
+// SettingManagement address is read from the per-chain address registry for
+// whichever network the script is run against — see lib/addresses.load() and
+// the chainId resolved at runtime in main(). (Previously this hard-coded
+// addresses/11155111.json, which only worked on Sepolia.)
+const addresses = require('./lib/addresses');
+
+// Chain-aware explorer + Safe-app slug for the printed runbook URLs.
+// Falls back to a bare etherscan host + numeric chainId for unknown chains.
+function chainLinks(chainId) {
+  switch (chainId) {
+    case 1:        return { explorer: 'https://etherscan.io',          safeSlug: 'eth' };
+    case 11155111: return { explorer: 'https://sepolia.etherscan.io',  safeSlug: 'sep' };
+    case 560048:   return { explorer: 'https://hoodi.etherscan.io',    safeSlug: 'hoodi' };
+    default:       return { explorer: 'https://etherscan.io',          safeSlug: String(chainId) };
+  }
+}
 
 // Minimal ABI — only the entries this script touches.
 const SETTING_MANAGEMENT_ABI = [
@@ -70,8 +84,17 @@ const SETTING_MANAGEMENT_ABI = [
 async function main() {
   const [deployer] = await ethers.getSigners();
   const network   = await ethers.provider.getNetwork();
+  const chainId   = Number(network.chainId);
+  const links     = chainLinks(chainId);
 
-  const settingMgmtAddress = ADDRESS_REGISTRY.SettingManagement;
+  const registry = addresses.load(chainId);
+  const settingMgmtAddress = registry.SettingManagement;
+  if (!settingMgmtAddress || !ethers.isAddress(settingMgmtAddress)) {
+    throw new Error(
+      `Invalid/missing SettingManagement in addresses/${chainId}.json: ${settingMgmtAddress}. ` +
+      `Deploy core contracts first (scripts/deploy-mainnet-core.js).`,
+    );
+  }
   const safeAddress        = process.env.OPERATOR_SAFE_ADDRESS;
 
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -156,8 +179,8 @@ async function main() {
   console.log(`  Current admin      : ${deployer.address}  (deployer — UNCHANGED)`);
   console.log(`  Pending admin      : ${safeAddress}  (Safe — must call acceptAdmin)`);
   console.log('');
-  console.log(`  Etherscan (tx)     : https://sepolia.etherscan.io/tx/${receipt.hash}`);
-  console.log(`  Etherscan (Safe)   : https://sepolia.etherscan.io/address/${safeAddress}`);
+  console.log(`  Etherscan (tx)     : ${links.explorer}/tx/${receipt.hash}`);
+  console.log(`  Etherscan (Safe)   : ${links.explorer}/address/${safeAddress}`);
   console.log('');
   console.log('  Step 2 (NEXT):');
   console.log('    The Safe must execute SettingManagement.acceptAdmin() to');
@@ -168,11 +191,11 @@ async function main() {
   console.log('         Safe Wallet UI → relayer fires execTransaction.');
   console.log('');
   console.log('      B) Manual via Safe Wallet UI (faster for dev):');
-  console.log(`         https://app.safe.global/home?safe=sep:${safeAddress}`);
+  console.log(`         https://app.safe.global/home?safe=${links.safeSlug}:${safeAddress}`);
   console.log(`         New transaction → Contract interaction →`);
   console.log(`         contract = ${settingMgmtAddress}`);
   console.log(`         method   = acceptAdmin (no args)`);
-  console.log(`         sign with 2 of 3 owners → execute.`);
+  console.log(`         sign with the Safe's threshold of owners → execute.`);
   console.log('');
   console.log('  Until Step 2 fires, the deployer EOA remains the on-chain');
   console.log('  admin and the gateway\'s existing flows continue working');
