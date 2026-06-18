@@ -31,7 +31,8 @@ const HTML = path.join(ROOT, 'PROD-DEPLOY-PIPELINE.html');
 // Only these scripts may be run from the console.
 const SCRIPTS = new Set([
   'deploy-mainnet-core.js',
-  'deploy-fyusd-earn-vault.js',
+  'deploy-vfyusd.js',                 // model A: single vFYUSD receipt token
+  'deploy-fyusd-earn-vault.js',       // model B only (unused under model A)
   'deploy-earn-lock-registry.js',
   'deploy-operator-safe.js',
   'grant-admin-to-safe.js',

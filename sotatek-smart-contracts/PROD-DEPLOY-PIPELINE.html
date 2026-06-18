@@ -124,7 +124,7 @@
 <body>
 <header class="hero"><div class="wrap">
   <h1>PROD 배포 콘솔 — Get FYUSD / Earn / Redeem</h1>
-  <p>Ethereum mainnet (chainId 1) · 담보 USDC·USDT · epoch / FYUSD 토큰 제외(FYUSD = BitGo 발행)</p>
+  <p>Ethereum mainnet (chainId 1) · 담보 USDC·USDT · <b>모델 A</b>(하이브리드, 단일 vFYUSD) · FYUSD=BitGo 발행 · FyusdEarnVault/어댑터 배포 없음 · Concrete는 백엔드 relayer 직접예치</p>
   <div class="row">
     <span class="tag">임시 deployer EOA로 배포 → 권한 3종을 Gnosis Safe로 이양 → EOA 폐기</span>
     <span id="conn" class="bad">● 서버 연결 안 됨</span>
@@ -236,22 +236,18 @@
       </div><pre class="term"></pre>
     </div></div>
 
-    <div class="step blue"><div class="num">2</div><div class="card">
-      <div class="top"><div class="title">Earn 볼트 + 어댑터 — USDC</div><div class="who eoa">deployer EOA</div></div>
-      <div class="out">배포: <b>FyusdEarnVault(USDC)=vFYUSD</b> · <b>ConcreteStableAdapter(USDC)</b> + initialize</div>
+    <div class="step blue"><div class="num">2</div><div class="card" style="border-left-color:var(--green)">
+      <div class="top"><div class="title">vFYUSD 토큰 배포 <span style="font-size:11px;color:var(--green);font-weight:700">모델 A</span></div><div class="who eoa">deployer EOA</div></div>
+      <div class="out">배포: <b>VFyusd</b>(단일 ERC-20, 6-dec) + relayer에 <code>MINTER_ROLE·BURNER_ROLE</code> 부여. admin=deployer→Safe. 키퍼가 입금 시 발행·redeem 시 소각.</div>
       <div class="runrow">
-        <button class="btn" data-script="deploy-fyusd-earn-vault.js" data-env="usdc:STABLE_ADDRESS,concreteUsdc:CONCRETE_VAULT_ADDRESS,sm:SETTING_MANAGEMENT_ADDRESS,admin:ADMIN_ADDRESS">▶ 실행 (USDC)</button>
-        <span class="needs">필요: USDC · Concrete(USDC) · SM · Admin</span>
+        <button class="btn" data-script="deploy-vfyusd.js" data-env="relayer:RELAYER_ADDRESS">▶ 실행</button>
+        <span class="needs">필요: <code>RELAYER_ADDRESS</code></span>
       </div><pre class="term"></pre>
     </div></div>
 
-    <div class="step blue"><div class="num">3</div><div class="card">
-      <div class="top"><div class="title">Earn 볼트 + 어댑터 — USDT</div><div class="who eoa">deployer EOA</div></div>
-      <div class="out">동일 스크립트 2회차. <b>두 번째 볼트/어댑터 주소를 따로 기록</b></div>
-      <div class="runrow">
-        <button class="btn" data-script="deploy-fyusd-earn-vault.js" data-env="usdt:STABLE_ADDRESS,concreteUsdt:CONCRETE_VAULT_ADDRESS,sm:SETTING_MANAGEMENT_ADDRESS,admin:ADMIN_ADDRESS">▶ 실행 (USDT)</button>
-        <span class="needs">필요: USDT · Concrete(USDT) · SM · Admin</span>
-      </div><pre class="term"></pre>
+    <div class="gate"><div class="num">ⓘ</div><div class="gateCard" style="background:repeating-linear-gradient(45deg,#e9f8f1,#e9f8f1 10px,#fff 10px,#fff 20px)">
+      <div class="title" style="color:var(--green)"><span class="m" style="background:var(--green)">모델 A</span>FyusdEarnVault · ConcreteStableAdapter <b>배포 안 함</b></div>
+      <p>모델 A(하이브리드, 단일 vFYUSD)는 온체인 볼트/어댑터 대신 <b>relayer가 Concrete 볼트(ctDefiUSDT · ctFYUSD-defi)에 직접 예치</b>합니다. 그 두 Concrete 볼트 주소는 컨트랙트 배포 대상이 아니라 <b>백엔드 env</b>(<code>FYPHERX_EARN_CONCRETE_VAULT</code> / <code>_VAULT_FYUSD</code>)로 설정 — 자세한 건 <code>PROD-CONCRETE-DEPLOY-ORDER-CHECKLIST</code> Phase 5. (<code>deploy-fyusd-earn-vault.js</code>는 모델 B 전용, 사용 안 함.)</p>
     </div></div>
 
     <div class="step blue"><div class="num">4</div><div class="card">
@@ -280,15 +276,15 @@
     <div class="gate"><div class="num">✋</div><div class="gateCard">
       <div class="title"><span class="m">수동</span>Safe UI — <code>acceptAdmin()</code></div>
       <p>app.safe.global (eth:&lt;safe&gt;) → Contract interaction → <code>SettingManagement.acceptAdmin()</code> → 임계값 오너 서명 → 실행.
-      <b>이 순간 Safe가 SM admin이 되고, SM.hasRole로 admin을 조회하는 모든 컨트랙트(Earn 볼트×2·어댑터·ReservePool·CircuitBreaker)를 자동 승계.</b> (콘솔 밖 — 유일한 수동 단계)</p>
+      <b>이 순간 Safe가 SM admin이 되고, SM.hasRole로 admin을 조회하는 컨트랙트(ReservePool·CircuitBreaker)를 자동 승계.</b> (콘솔 밖 — 유일한 수동 단계)</p>
     </div></div>
 
     <div class="step amber"><div class="num">6</div><div class="card">
       <div class="top"><div class="title">② ProxyAdmin(업그레이드 권한) 이전</div><div class="who eoa">deployer EOA</div></div>
-      <div class="out">업그레이더블 프록시(SettingManagement·CircuitBreaker·Earn볼트×2)의 <b>ProxyAdmin 소유권 → Safe</b>. 빠지면 EOA가 업그레이드 권한 보유 → 멀티시그 무력화.</div>
+      <div class="out">업그레이더블 프록시(SettingManagement·CircuitBreaker)의 <b>ProxyAdmin 소유권 → Safe</b>. 빠지면 EOA가 업그레이드 권한 보유 → 멀티시그 무력화. <span style="color:var(--green)">모델 A는 Earn 볼트 프록시 없음 → <code>PROXY_ADDRESSES</code> 비움.</span></div>
       <div class="runrow">
         <button class="btn amber" data-script="transfer-proxy-admin-to-safe.js" data-env="safe:OPERATOR_SAFE_ADDRESS,proxy:PROXY_ADDRESSES">▶ 실행</button>
-        <span class="needs">필요: Safe · (두번째 볼트) <code>PROXY_ADDRESSES</code></span>
+        <span class="needs">필요: <code>OPERATOR_SAFE_ADDRESS</code></span>
       </div><pre class="term"></pre>
     </div></div>
 
