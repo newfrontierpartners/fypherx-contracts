@@ -58,6 +58,31 @@ async function main() {
   console.log("- Repeat on sepolia if you want the audit/reference deploy re-labeled.");
 }
 
+// Read symbol()/name() from a NON-admin caller via eth_call. Reading through
+// the contract object with the deployer (proxy-admin owner) signer can return a
+// stale/admin-routed value right after an upgrade; a plain call from a neutral
+// address always hits the implementation.
+const VIEW_IFACE = new ethers.Interface([
+  "function symbol() view returns (string)",
+  "function name() view returns (string)",
+]);
+const NEUTRAL = "0x0000000000000000000000000000000000000001";
+async function readView(addr, fn) {
+  const ret = await ethers.provider.call({ to: addr, from: NEUTRAL, data: VIEW_IFACE.encodeFunctionData(fn) });
+  return VIEW_IFACE.decodeFunctionResult(fn, ret)[0];
+}
+// Poll past RPC read-after-write lag (each call is a network round-trip, so
+// the iteration count doubles as the delay — no wall-clock sleep needed).
+async function awaitSymbol(addr, expected, tries = 40) {
+  let last;
+  for (let i = 0; i < tries; i++) {
+    last = await readView(addr, "symbol");
+    if (last === expected) return last;
+    await ethers.provider.getBlockNumber(); // advance + pace
+  }
+  return last;
+}
+
 async function upgradeToken(contractName, proxyAddr, expectedSymbol) {
   console.log(`── ${contractName} @ ${proxyAddr || "(missing)"} ──`);
   if (!proxyAddr) {
@@ -65,9 +90,8 @@ async function upgradeToken(contractName, proxyAddr, expectedSymbol) {
     return;
   }
 
-  const before = await ethers.getContractAt(contractName, proxyAddr);
-  const beforeSym = await before.symbol();
-  const beforeName = await before.name();
+  const beforeSym = await readView(proxyAddr, "symbol");
+  const beforeName = await readView(proxyAddr, "name");
   console.log(`  before:  name="${beforeName}" symbol="${beforeSym}"`);
   if (beforeSym === expectedSymbol) {
     console.log(`  ✓ already "${expectedSymbol}" — skipped\n`);
@@ -78,10 +102,10 @@ async function upgradeToken(contractName, proxyAddr, expectedSymbol) {
   const upgraded = await upgrades.upgradeProxy(proxyAddr, Factory);
   await upgraded.waitForDeployment();
 
-  const afterSym = await upgraded.symbol();
-  const afterName = await upgraded.name();
+  const afterSym = await awaitSymbol(proxyAddr, expectedSymbol);
+  const afterName = await readView(proxyAddr, "name");
   if (afterSym !== expectedSymbol) {
-    throw new Error(`${contractName} symbol is "${afterSym}", expected "${expectedSymbol}"`);
+    throw new Error(`${contractName} symbol is "${afterSym}", expected "${expectedSymbol}" (after upgrade — check propagation)`);
   }
   console.log(`  ✓ upgraded (proxy unchanged): name="${afterName}" symbol="${afterSym}"\n`);
 }
