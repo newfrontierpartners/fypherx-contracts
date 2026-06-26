@@ -109,14 +109,29 @@ contract StakedFYP is
         if (_silo == address(0)) revert ZeroAddress();
 
         __ERC4626_init(_fyp);
-        __ERC20_init("Staked FYP", "sFYP");
+        __ERC20_init("Staked FYPE", "sFYPE");
         __ERC20Pausable_init();
-        __ERC20Permit_init("Staked FYP");
+        __ERC20Permit_init("Staked FYPE");
         __ReentrancyGuard_init();
 
         settingManagement = _settingManagement;
         silo = _silo;
         _lastDistributionTimestamp = block.timestamp;
+    }
+
+    /**
+     * @notice Display metadata re-labeled "Staked FYPE" / "sFYPE" (the product
+     *         name). These overrides re-symbolize the live proxy on an
+     *         implementation upgrade without a storage migration; fresh deploys
+     *         initialize the same. (The EIP-2612 permit domain keeps its stored
+     *         name for already-issued signatures — display only.)
+     */
+    function name() public view override(ERC20Upgradeable, IERC20Metadata) returns (string memory) {
+        return "Staked FYPE";
+    }
+
+    function symbol() public view override(ERC20Upgradeable, IERC20Metadata) returns (string memory) {
+        return "sFYPE";
     }
 
     modifier onlyAdmin() {

@@ -58,10 +58,26 @@ contract FYP is
     }
 
     function initialize(address owner_) external initializer {
-        __ERC20_init("FYP", "FYP");
+        __ERC20_init("FYPE", "FYPE");
         __ERC20Burnable_init();
         __ERC20Pausable_init();
         __Ownable_init(owner_);
+    }
+
+    /**
+     * @notice Display metadata is "FYPE" — the protocol's product name. The
+     *         live token was originally initialized as "FYP"; these overrides
+     *         re-label {name}/{symbol} to "FYPE" so an implementation upgrade
+     *         re-symbolizes the existing proxy address-preservingly, with no
+     *         storage migration and no holder/balance impact. Fresh deploys
+     *         also initialize as "FYPE" (see {initialize}).
+     */
+    function name() public view override returns (string memory) {
+        return "FYPE";
+    }
+
+    function symbol() public view override returns (string memory) {
+        return "FYPE";
     }
 
     /**
