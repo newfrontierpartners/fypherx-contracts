@@ -17,13 +17,13 @@
  *
  * Scope
  * ─────
- * Testnet only — FYP is NOT deployed on Ethereum mainnet (addresses/1.json has
- * no FYP). Run on hoodi (the dev cluster's chain) and optionally sepolia.
+ * Dev (Hoodi) only — we support exactly two targets, prod = Ethereum mainnet
+ * and dev = Hoodi. FYP is NOT deployed on mainnet (addresses/1.json has no FYP),
+ * so this only ever runs on Hoodi.
  *
  * Usage
  * ─────
  *   npx hardhat run scripts/upgrade-fype-symbol.js --network hoodi
- *   npx hardhat run scripts/upgrade-fype-symbol.js --network sepolia
  */
 const { ethers, upgrades } = require("hardhat");
 const addresses = require("./lib/addresses");
@@ -39,7 +39,7 @@ async function main() {
   const balBefore = await ethers.provider.getBalance(deployer.address);
   console.log(`Balance:   ${ethers.formatEther(balBefore)} (gas token)\n`);
 
-  if (chainId === 1) throw new Error("FYP is not deployed on Ethereum mainnet — testnet only.");
+  if (chainId !== 560048) throw new Error(`unsupported chain ${chainId} — FYP lives on Hoodi (560048) only; mainnet has no FYP token.`);
 
   const addrs = addresses.load(chainId);
 
@@ -55,7 +55,6 @@ async function main() {
   console.log("──────────");
   console.log("- /api/v1/tokens reads on-chain symbol() → now returns FYPE; the");
   console.log("  frontend FYP→FYPE display shim becomes a no-op (remove in Depth B).");
-  console.log("- Repeat on sepolia if you want the audit/reference deploy re-labeled.");
 }
 
 // Read symbol()/name() from a NON-admin caller via eth_call. Reading through
