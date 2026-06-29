@@ -59,11 +59,15 @@ contract MockConcreteAdapter is IConcreteAdapter {
     event Deposited(address indexed holder, uint256 fyusdAmount, uint256 shares);
     event Withdrawn(address indexed holder, uint256 shares, uint256 fyusdAmount);
     event YieldFunded(address indexed from, uint256 amount);
+    event PositionClosed(address indexed to, uint256 assetsOut);
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
 
     error InsufficientLiquidity(uint256 have, uint256 want);
     error ZeroAmount();
+    error ZeroAddress();
     error InsufficientShares(uint256 have, uint256 want);
     error NotVault();
+    error CannotRescueAsset();
     /// @notice FYP-41: caller asked for more underlying than the
     ///         adapter currently tracks.
     error InsufficientAssets(uint256 requested, uint256 available);
@@ -172,6 +176,39 @@ contract MockConcreteAdapter is IConcreteAdapter {
         if (amount == 0) revert ZeroAmount();
         fyusd.safeTransferFrom(msg.sender, address(this), amount);
         emit YieldFunded(msg.sender, amount);
+    }
+
+    /// @notice FYP-41 (residual) — ledger-independent close-out, mirroring
+    ///         {ConcreteAdapterV1.recoverAll}. Pays out the entire tracked
+    ///         position (principal + accrued yield) to {to} and zeroes the
+    ///         internal accounting so the bound vault can rotate adapters
+    ///         cleanly once it is wound down.
+    function recoverAll(address to) external onlyVault returns (uint256 assetsOut) {
+        if (to == address(0)) revert ZeroAddress();
+        _accrue();
+        assetsOut = principal + accruedYield;
+        principal = 0;
+        accruedYield = 0;
+        totalShares = 0;
+        if (assetsOut == 0) {
+            emit PositionClosed(to, 0);
+            return 0;
+        }
+        uint256 bal = fyusd.balanceOf(address(this));
+        if (bal < assetsOut) revert InsufficientLiquidity(bal, assetsOut);
+        fyusd.safeTransfer(to, assetsOut);
+        emit PositionClosed(to, assetsOut);
+    }
+
+    /// @notice FYP-75 — mirror of {ConcreteAdapterV1.rescueToken}. Recovers
+    ///         arbitrary ERC-20s sent here by mistake; reverts on the
+    ///         underlying FYUSD because that is the mock's protocol-owned
+    ///         backing.
+    function rescueToken(address token, address to, uint256 amount) external onlyVault {
+        if (to == address(0)) revert ZeroAddress();
+        if (token == address(fyusd)) revert CannotRescueAsset();
+        IERC20(token).safeTransfer(to, amount);
+        emit TokenRescued(token, to, amount);
     }
 
     // ── Internal ──

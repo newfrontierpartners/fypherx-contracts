@@ -12,6 +12,15 @@ import "../interfaces/IStakedRUSDCooldown.sol";
 import "../interfaces/ISettingManagement.sol";
 import "../libraries/PoolMath.sol";
 
+/// @dev FYP-73 — minimal typed view of the cooldown silo so withdrawals use a
+///      high-level call (matching {StakedRUSD}/{StakedAUSD}). A high-level call
+///      reverts if `silo` is ever mis-set to an EOA (Solidity inserts an
+///      extcodesize check), unlike the prior low-level `silo.call(...)` which
+///      would silently report success against an account with no code.
+interface IFypherCooldownSilo {
+    function withdraw(address to, uint256 amount) external;
+}
+
 /**
  * @title StakedFYP (sFYP)
  * @notice ERC4626 vault for FYP governance token staking.
@@ -235,6 +244,29 @@ contract StakedFYP is
     function previewWithdraw(uint256) public pure override returns (uint256) { return 0; }
     function previewRedeem(uint256) public pure override returns (uint256) { return 0; }
 
+    /// @notice FYP-34: advertise deposit/mint capacity consistently with the
+    ///         {whenNotPaused} + {notRestricted(receiver)} guards on
+    ///         {deposit} / {mint}. Returns 0 when the vault is paused or the
+    ///         receiver is a restricted staker, so ERC-4626 integrators that
+    ///         consult {maxDeposit} / {maxMint} do not attempt an entry that
+    ///         would revert.
+    function maxDeposit(address receiver) public view override returns (uint256) {
+        if (paused() || _isDepositRestricted(receiver)) return 0;
+        return super.maxDeposit(receiver);
+    }
+
+    function maxMint(address receiver) public view override returns (uint256) {
+        if (paused() || _isDepositRestricted(receiver)) return 0;
+        return super.maxMint(receiver);
+    }
+
+    /// @dev FYP-34 helper: view mirror of {notRestricted}'s role checks so
+    ///      {maxDeposit} / {maxMint} can reflect receiver restrictions.
+    function _isDepositRestricted(address account) internal view returns (bool) {
+        return settingManagement.hasRole(keccak256("FULL_RESTRICTED_STAKER_ROLE"), account)
+            || settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), account);
+    }
+
     /**
      * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
      * @dev April-audit M-4 patch. See StakedRUSD._debitUserStaked.
@@ -296,11 +328,8 @@ contract StakedFYP is
         uint256 assets = cd.underlyingAmount;
         delete cooldowns[msg.sender];
 
-        // RUSDSilo pattern: withdraw(to, amount)
-        (bool success,) = silo.call(
-            abi.encodeWithSignature("withdraw(address,uint256)", receiver, assets)
-        );
-        require(success, "Silo withdraw failed");
+        // FYP-73: high-level typed silo call (reverts if silo has no code).
+        IFypherCooldownSilo(silo).withdraw(receiver, assets);
 
         emit Unstaked(msg.sender, receiver, assets);
     }
@@ -316,9 +345,10 @@ contract StakedFYP is
      *      to wait the full cooldown even though the supporting
      *      `earlyUnstakeFee` config slot already existed in
      *      SettingManagement. Adding the symmetric entry-point closes
-     *      that asymmetry. Silo invocation uses the same `.call`
-     *      pattern as {unstake} because `silo` is held as an `address`
-     *      (vs. the typed {RUSDSilo} field in StakedRUSD).
+     *      that asymmetry. FYP-73: silo withdrawals now use a high-level
+     *      typed {IFypherCooldownSilo} call (matching {unstake} and
+     *      {StakedRUSD}/{StakedAUSD}) so a mis-configured EOA silo reverts
+     *      instead of silently reporting success.
      */
     function earlyUnstake(address receiver) external nonReentrant whenNotPaused {
         UserCooldown storage cd = cooldowns[msg.sender];
@@ -337,15 +367,10 @@ contract StakedFYP is
         uint256 netAssets = assets - fee;
         delete cooldowns[msg.sender];
 
-        (bool ok1,) = silo.call(
-            abi.encodeWithSignature("withdraw(address,uint256)", receiver, netAssets)
-        );
-        require(ok1, "Silo withdraw failed");
+        // FYP-73: high-level typed silo calls (revert if silo has no code).
+        IFypherCooldownSilo(silo).withdraw(receiver, netAssets);
         if (fee > 0) {
-            (bool ok2,) = silo.call(
-                abi.encodeWithSignature("withdraw(address,uint256)", feeReceiver, fee)
-            );
-            require(ok2, "Silo fee withdraw failed");
+            IFypherCooldownSilo(silo).withdraw(feeReceiver, fee);
         }
 
         emit EarlyUnstaked(msg.sender, receiver, netAssets, fee);
@@ -419,6 +444,32 @@ contract StakedFYP is
     function unpause() external onlyAdmin { _unpause(); }
 
     /**
+     * @notice FYP-77: aligned with {StakedRUSD}. Release a non-asset token
+     *         that was sent to this vault by mistake to an arbitrary
+     *         recipient, gated by RELEASE_TOKEN_ROLE. The `token != asset()`
+     *         guard prevents draining staker principal.
+     */
+    function releaseToken(address token, address to, uint256 amount) external {
+        require(
+            settingManagement.hasRole(keccak256("RELEASE_TOKEN_ROLE"), msg.sender),
+            "Not release role"
+        );
+        require(token != asset(), "Cannot release staked asset");
+        require(to != address(0), "Zero recipient");
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    /**
+     * @notice FYP-77: aligned with {StakedRUSD}. Admin recovery of a
+     *         non-asset token sent to this vault by mistake. The
+     *         `token != asset()` guard prevents draining staker principal.
+     */
+    function rescueTokens(address token, address to, uint256 amount) external onlyAdmin {
+        require(token != asset(), "Cannot rescue staked asset");
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    /**
      * @dev FYP-03 patch + FYP-03 lingering patch.
      *      See {StakedRUSD._update} for the full rationale (NAV-based
      *      principal-move inflated recipient principal by accrued
@@ -446,5 +497,18 @@ contract StakedFYP is
 
     function decimals() public view override(ERC20Upgradeable, ERC4626Upgradeable) returns (uint8) {
         return super.decimals();
+    }
+
+    /**
+     * @notice FYP-77: explicit ERC-4626 virtual-share offset override,
+     *         aligned with {StakedRUSD}. Intentionally left at the OZ
+     *         default of `0`; see {StakedRUSD._decimalsOffset} for the
+     *         first-depositor-inflation rationale and the pre-mainnet
+     *         redeploy plan. Declared explicitly so all three staked
+     *         vaults expose an identical surface and a future contributor
+     *         cannot silently re-introduce the change on one vault only.
+     */
+    function _decimalsOffset() internal view virtual override returns (uint8) {
+        return 0;
     }
 }

@@ -117,6 +117,11 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     event Deposited(address indexed caller, uint256 assetsIn, uint256 sharesMinted);
     event Withdrawn (address indexed caller, uint256 sharesBurned, uint256 assetsOut);
     event ConcreteSharesSwept(address indexed to, uint256 amount);
+    /// @notice FYP-75: an arbitrary ERC-20 mistakenly sent here was rescued.
+    event TokenRescued(address indexed token, address indexed to, uint256 amount);
+    /// @notice FYP-41: the whole accounted Concrete position was closed out
+    ///         (used during adapter rotation when the vault is wound down).
+    event PositionClosed(address indexed to, uint256 concreteSharesRedeemed, uint256 assetsOut);
 
     // ── Errors ──
     error AdapterAssetMismatch(address expected, address actual);
@@ -125,6 +130,10 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
     error ZeroAddress();
     error NotVault();
     error NoExcessShares();
+    /// @notice FYP-75: the tracked Concrete vault share token can never be
+    ///         routed through the generic ERC-20 rescue (it is protocol-
+    ///         owned backing; use {sweepConcreteShares} for true excess).
+    error CannotRescueConcreteShares();
     /// @notice FYP-41: caller asked for more underlying than the adapter
     ///         currently controls via Concrete (totalAssets).
     error InsufficientAssets(uint256 requested, uint256 available);
@@ -309,5 +318,68 @@ contract ConcreteAdapterV1 is IConcreteAdapter {
         amount = raw - accountedConcreteShares;
         IERC20(address(concreteVault)).safeTransfer(to, amount);
         emit ConcreteSharesSwept(to, amount);
+    }
+
+    /**
+     * @notice FYP-41 (residual) — ledger-independent close-out of the
+     *         entire accounted Concrete position. Redeems every Concrete
+     *         vault share the adapter has accounted for, delivering the
+     *         underlying FYUSD to {to}, and zeroes the internal share
+     *         ledger. Authorised by the bound vault (which only calls this
+     *         once its own ERC-4626 supply is zero), so no live depositor
+     *         can be stripped of backing.
+     *
+     * @dev CertiK FYP-41 residual cases. Because the vault (OZ ERC-4626
+     *      virtual-offset rounding) and this adapter (raw share rounding)
+     *      can drift, a wound-down vault could leave either residual
+     *      adapter-shares (which the old guard treated as "still holds
+     *      shares" and refused to rotate past) or residual assets (which
+     *      the old guard could not see at all). This entry-point clears
+     *      BOTH in one asset-denominated sweep, regardless of the internal
+     *      share count, so {FyusdYieldVault.setAdapter} can then rotate
+     *      cleanly. Uses {IERC4626.redeem} (shares-in) rather than
+     *      {withdraw} (assets-in) so it works even when the internal
+     *      {totalShares} has already rounded to zero while Concrete shares
+     *      remain. True excess (direct-transfer) Concrete shares are NOT
+     *      touched here — those are handled by {sweepConcreteShares}.
+     */
+    function recoverAll(address to) external onlyVault returns (uint256 assetsOut) {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 cShares = accountedConcreteShares;
+        accountedConcreteShares = 0;
+        totalShares = 0;
+        if (cShares == 0) {
+            emit PositionClosed(to, 0, 0);
+            return 0;
+        }
+        assetsOut = concreteVault.redeem(cShares, to, address(this));
+        emit PositionClosed(to, cShares, assetsOut);
+    }
+
+    /**
+     * @notice FYP-75 — admin-gated (via the bound vault) recovery hatch for
+     *         arbitrary ERC-20 tokens accidentally sent to the adapter
+     *         address (airdrops, wrong-token transfers, the underlying
+     *         FYUSD sent directly instead of through {deposit}, etc.).
+     *
+     * @dev Reverts on the tracked Concrete vault share token so the
+     *      protocol-owned backing can never be swept out through this
+     *      generic path — true excess Concrete shares (from direct
+     *      transfers) are recovered through {sweepConcreteShares}, which
+     *      preserves {accountedConcreteShares}. The underlying FYUSD is
+     *      rescuable here because the adapter holds no FYUSD between calls
+     *      (every deposit forwards it to Concrete in the same tx and the
+     *      allowance is reset to zero), so any FYUSD resting on the
+     *      adapter is necessarily a mistaken transfer outside the
+     *      accounted flow. Authorisation is delegated to the bound vault
+     *      (msg.sender == vault), mirroring {sweepConcreteShares}, so the
+     *      vault's admin chain gates the call without the adapter
+     *      re-implementing a role check.
+     */
+    function rescueToken(address token, address to, uint256 amount) external onlyVault {
+        if (to == address(0)) revert ZeroAddress();
+        if (token == address(concreteVault)) revert CannotRescueConcreteShares();
+        IERC20(token).safeTransfer(to, amount);
+        emit TokenRescued(token, to, amount);
     }
 }

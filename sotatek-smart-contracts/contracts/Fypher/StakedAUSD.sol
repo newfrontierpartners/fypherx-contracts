@@ -230,6 +230,29 @@ contract StakedAUSD is
     function previewWithdraw(uint256) public pure override returns (uint256) { return 0; }
     function previewRedeem(uint256) public pure override returns (uint256) { return 0; }
 
+    /// @notice FYP-34: advertise deposit/mint capacity consistently with the
+    ///         {whenNotPaused} + {notRestricted(receiver)} guards on
+    ///         {deposit} / {mint}. Returns 0 when the vault is paused or the
+    ///         receiver is a restricted staker, so ERC-4626 integrators that
+    ///         consult {maxDeposit} / {maxMint} do not attempt an entry that
+    ///         would revert.
+    function maxDeposit(address receiver) public view override returns (uint256) {
+        if (paused() || _isDepositRestricted(receiver)) return 0;
+        return super.maxDeposit(receiver);
+    }
+
+    function maxMint(address receiver) public view override returns (uint256) {
+        if (paused() || _isDepositRestricted(receiver)) return 0;
+        return super.maxMint(receiver);
+    }
+
+    /// @dev FYP-34 helper: view mirror of {notRestricted}'s role checks so
+    ///      {maxDeposit} / {maxMint} can reflect receiver restrictions.
+    function _isDepositRestricted(address account) internal view returns (bool) {
+        return settingManagement.hasRole(keccak256("FULL_RESTRICTED_STAKER_ROLE"), account)
+            || settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), account);
+    }
+
     /**
      * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
      * @dev April-audit M-4 patch. See StakedRUSD._debitUserStaked.
@@ -395,6 +418,32 @@ contract StakedAUSD is
     function unpause() external onlyAdmin { _unpause(); }
 
     /**
+     * @notice FYP-77: aligned with {StakedRUSD}. Release a non-asset token
+     *         that was sent to this vault by mistake to an arbitrary
+     *         recipient, gated by RELEASE_TOKEN_ROLE. The `token != asset()`
+     *         guard prevents draining staker principal.
+     */
+    function releaseToken(address token, address to, uint256 amount) external {
+        require(
+            settingManagement.hasRole(keccak256("RELEASE_TOKEN_ROLE"), msg.sender),
+            "Not release role"
+        );
+        require(token != asset(), "Cannot release staked asset");
+        require(to != address(0), "Zero recipient");
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    /**
+     * @notice FYP-77: aligned with {StakedRUSD}. Admin recovery of a
+     *         non-asset token sent to this vault by mistake. The
+     *         `token != asset()` guard prevents draining staker principal.
+     */
+    function rescueTokens(address token, address to, uint256 amount) external onlyAdmin {
+        require(token != asset(), "Cannot rescue staked asset");
+        IERC20(token).safeTransfer(to, amount);
+    }
+
+    /**
      * @dev FYP-03 patch + FYP-03 lingering patch.
      *      See {StakedRUSD._update} for the full rationale.
      */
@@ -420,5 +469,18 @@ contract StakedAUSD is
 
     function decimals() public view override(ERC20Upgradeable, ERC4626Upgradeable) returns (uint8) {
         return super.decimals();
+    }
+
+    /**
+     * @notice FYP-77: explicit ERC-4626 virtual-share offset override,
+     *         aligned with {StakedRUSD}. Intentionally left at the OZ
+     *         default of `0`; see {StakedRUSD._decimalsOffset} for the
+     *         first-depositor-inflation rationale and the pre-mainnet
+     *         redeploy plan. Declared explicitly so all three staked
+     *         vaults expose an identical surface and a future contributor
+     *         cannot silently re-introduce the change on one vault only.
+     */
+    function _decimalsOffset() internal view virtual override returns (uint8) {
+        return 0;
     }
 }
