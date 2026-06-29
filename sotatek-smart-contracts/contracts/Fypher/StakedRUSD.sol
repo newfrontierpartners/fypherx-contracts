@@ -359,6 +359,29 @@ contract StakedRUSD is
         return 0;
     }
 
+    /// @notice FYP-34: advertise deposit/mint capacity consistently with the
+    ///         {whenNotPaused} + {notRestricted(receiver)} guards on
+    ///         {deposit} / {mint}. Returns 0 when the vault is paused or the
+    ///         receiver is a restricted staker, so ERC-4626 integrators that
+    ///         consult {maxDeposit} / {maxMint} do not attempt an entry that
+    ///         would revert.
+    function maxDeposit(address receiver) public view override returns (uint256) {
+        if (paused() || _isDepositRestricted(receiver)) return 0;
+        return super.maxDeposit(receiver);
+    }
+
+    function maxMint(address receiver) public view override returns (uint256) {
+        if (paused() || _isDepositRestricted(receiver)) return 0;
+        return super.maxMint(receiver);
+    }
+
+    /// @dev FYP-34 helper: view mirror of {notRestricted}'s role checks so
+    ///      {maxDeposit} / {maxMint} can reflect receiver restrictions.
+    function _isDepositRestricted(address account) internal view returns (bool) {
+        return settingManagement.hasRole(keccak256("FULL_RESTRICTED_STAKER_ROLE"), account)
+            || settingManagement.hasRole(keccak256("SOFT_RESTRICTED_STAKER_ROLE"), account);
+    }
+
     /**
      * @notice Reduce {userStakedAmount} by `assets`, clamping at 0.
      *

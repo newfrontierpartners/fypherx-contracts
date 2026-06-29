@@ -25,13 +25,19 @@ interface IFYUSDPermit {
     ) external;
 }
 
-/// @dev Optional extension on {IConcreteAdapter}. ConcreteAdapterV1
-///      implements this; legacy mock adapters may not. Only consumed by
-///      {sweepAdapterConcreteShares} which is admin-gated, so a mock
-///      that lacks the entry-point simply leaves the sweep call
-///      reverting — acceptable for test scaffolds.
-interface IConcreteAdapterSweepable {
+/// @dev Optional admin-extension on {IConcreteAdapter}. ConcreteAdapterV1
+///      implements all three; legacy mock adapters may not. Only consumed
+///      by admin-gated entry-points, so a mock that lacks an entry-point
+///      simply leaves that call reverting — acceptable for test scaffolds.
+interface IConcreteAdapterAdmin {
     function sweepConcreteShares(address to) external returns (uint256 amount);
+    /// @notice FYP-41: ledger-independent close-out of the whole accounted
+    ///         position (residual shares AND residual assets) for clean
+    ///         adapter rotation once the vault is wound down.
+    function recoverAll(address to) external returns (uint256 assetsOut);
+    /// @notice FYP-75: admin-gated arbitrary-ERC20 rescue. Reverts on the
+    ///         tracked Concrete vault share token.
+    function rescueToken(address token, address to, uint256 amount) external;
 }
 
 /**
@@ -110,7 +116,13 @@ contract FyusdYieldVault is
     error ZeroAddress();
     error AdapterAssetMismatch(address vault, address adapter);
     error AdapterReturnedShort(uint256 expected, uint256 received);
-    error AdapterStillHoldsShares(uint256 shares);
+    /// @notice FYP-41 (residual): the vault still has vFYUSD shares
+    ///         outstanding, so the adapter cannot be closed out or rotated.
+    error VaultNotEmpty(uint256 supply);
+    /// @notice FYP-41 (residual): the old adapter still reports a non-zero
+    ///         asset position; close it out via {closeAdapterPosition}
+    ///         before rotating.
+    error AdapterStillHoldsAssets(uint256 assets);
     error TimelockNotElapsed(uint256 eta);
     error NoPendingManager();
     error AdminMismatch(address admin_);
@@ -255,6 +267,19 @@ contract FyusdYieldVault is
     }
     function previewRedeem(uint256) public pure override returns (uint256) {
         return 0;
+    }
+
+    /// @notice FYP-34: advertise deposit/mint capacity consistently with the
+    ///         {whenNotPaused} guard on {deposit} / {mint}. Returns 0 while
+    ///         the vault is paused so ERC-4626 integrators that consult
+    ///         {maxDeposit} / {maxMint} do not attempt an entry that would
+    ///         revert. (vFYUSD has no receiver-restriction gate, unlike the
+    ///         staked vaults, so pause is the only deposit-side constraint.)
+    function maxDeposit(address receiver) public view override returns (uint256) {
+        return paused() ? 0 : super.maxDeposit(receiver);
+    }
+    function maxMint(address receiver) public view override returns (uint256) {
+        return paused() ? 0 : super.maxMint(receiver);
     }
 
     function deposit(uint256 assets, address receiver)
@@ -405,31 +430,60 @@ contract FyusdYieldVault is
 
     // ── Admin ──
     /**
-     * @dev FYP-09 patch. The previous shape blindly rebound the
-     *      adapter, orphaning every asset still parked in the old
-     *      adapter (since totalAssets() reads from the new, empty one
-     *      and adapter.withdraw on the new adapter has no record of
-     *      our shares). The NatSpec referenced an emergencyMigrate
-     *      step that never existed.
+     * @dev FYP-09 patch + FYP-41 residual patch.
      *
-     *      We now require `oldAdapter.shareOf(this) == 0` before any
-     *      rebind — operators must first drain the existing adapter
-     *      (e.g. via the standard cooldown flow, an admin-staged
-     *      `withdrawAll` helper, or a future emergencyMigrate hook
-     *      added in tandem) so the share-state invariant
-     *      `totalSupply == adapter.shareOf(vault)` is never broken
-     *      across the rebind.
+     *      <p>FYP-09: the original shape blindly rebound the adapter,
+     *      orphaning every asset still parked in the old adapter (since
+     *      totalAssets() reads from the new, empty one). The NatSpec
+     *      referenced an emergencyMigrate step that never existed.
+     *
+     *      <p>FYP-41 residual (CertiK): the follow-up guard
+     *      `oldAdapter.shareOf(this) == 0` keyed rotation off the
+     *      adapter's INTERNAL share ledger. That ledger rounds
+     *      differently from the vault's OZ ERC-4626 virtual-offset math,
+     *      so the two can drift: a wound-down vault could be left with
+     *      residual adapter-shares that wrongly BLOCK rotation (case 1),
+     *      or with the adapter-share count rounded to zero while residual
+     *      ASSETS remain in Concrete that the guard could not see at all
+     *      (case 2).
+     *
+     *      <p>The fix keys rotation off the single source of truth — the
+     *      vault's own ERC-4626 supply — and an ASSET-denominated residual
+     *      check. Rotation is permitted only once every vFYUSD share has
+     *      been redeemed (`totalSupply() == 0`) AND the old adapter reports
+     *      no residual assets. Any rounding-dust position still parked in
+     *      the old adapter is cleared first via {closeAdapterPosition},
+     *      which is ledger-independent and covers both residual shares and
+     *      residual assets.
      */
     function setAdapter(IConcreteAdapter newAdapter) external onlyAdmin {
         if (address(newAdapter) == address(0)) revert ZeroAddress();
         if (newAdapter.asset() != asset()) {
             revert AdapterAssetMismatch(asset(), newAdapter.asset());
         }
-        if (adapter.shareOf(address(this)) != 0) {
-            revert AdapterStillHoldsShares(adapter.shareOf(address(this)));
-        }
+        if (totalSupply() != 0) revert VaultNotEmpty(totalSupply());
+        uint256 residual = adapter.totalAssets();
+        if (residual != 0) revert AdapterStillHoldsAssets(residual);
         emit AdapterUpdated(address(adapter), address(newAdapter));
         adapter = newAdapter;
+    }
+
+    /**
+     * @notice FYP-41 (residual) — close out the current adapter's entire
+     *         accounted position once the vault is wound down, delivering
+     *         the residual underlying to {to}. This is the asset-based,
+     *         ledger-independent migration helper CertiK asked for: it
+     *         clears BOTH residual adapter-shares (case 1) and residual
+     *         assets (case 2), after which {setAdapter} can rotate cleanly.
+     *
+     * @dev Gated on `totalSupply() == 0` so it can never strip backing
+     *      from a live shareholder. Admin-only — proxied through the vault
+     *      because the adapter binds {recoverAll} to msg.sender == vault.
+     */
+    function closeAdapterPosition(address to) external onlyAdmin returns (uint256 recovered) {
+        if (to == address(0)) revert ZeroAddress();
+        if (totalSupply() != 0) revert VaultNotEmpty(totalSupply());
+        return IConcreteAdapterAdmin(address(adapter)).recoverAll(to);
     }
 
     /**
@@ -442,7 +496,18 @@ contract FyusdYieldVault is
      */
     function sweepAdapterConcreteShares(address to) external onlyAdmin returns (uint256 swept) {
         if (to == address(0)) revert ZeroAddress();
-        return IConcreteAdapterSweepable(address(adapter)).sweepConcreteShares(to);
+        return IConcreteAdapterAdmin(address(adapter)).sweepConcreteShares(to);
+    }
+
+    /**
+     * @notice FYP-75 — admin recovery of arbitrary ERC-20 tokens
+     *         accidentally sent to the bound adapter. Proxied through the
+     *         vault because the adapter binds its {rescueToken} entry-point
+     *         to msg.sender == this vault; the adapter itself reverts on
+     *         the tracked Concrete vault share token.
+     */
+    function rescueAdapterToken(address token, address to, uint256 amount) external onlyAdmin {
+        IConcreteAdapterAdmin(address(adapter)).rescueToken(token, to, amount);
     }
 
     function setPauserRole(address newPauser) external onlyAdmin {
@@ -486,9 +551,12 @@ contract FyusdYieldVault is
 
     // ── View ──
 
-    /// @notice Adapter-recorded share balance held by THIS vault. Should
-    ///         track {totalSupply} in lockstep; mismatch indicates a
-    ///         migration in flight or an adapter bug.
+    /// @notice Adapter-recorded share balance held by THIS vault.
+    /// @dev FYP-41: dashboard-only. The vault's ERC-4626 supply is the
+    ///      sole source of share accounting; the adapter's internal ledger
+    ///      can drift from it by rounding dust and is NOT used for any
+    ///      exit or rotation decision (see {setAdapter} /
+    ///      {closeAdapterPosition}). Reads {totalAssets} for backing.
     function adapterShares() external view returns (uint256) {
         return adapter.shareOf(address(this));
     }
