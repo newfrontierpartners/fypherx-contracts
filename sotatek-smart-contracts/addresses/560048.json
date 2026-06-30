@@ -1,6 +1,7 @@
 {
   "_comment": "Ethereum HOODI testnet (chainId 560048). Address registry for the FYUSD x Concrete integration testnet smoke. FYUSD is the only entry pre-populated — Concrete deployed it on HOODI directly because they don't support Sepolia for the partner stable-vault flow. The remaining addresses fill in as `scripts/multisig/deploy-safe.js` and `scripts/deploy-phase1.js` run against this network. See `scripts/deploy-hoodi.js` for the full deploy runbook.",
   "FYUSD": "0xD1bbd247be78c68CDEB8486744Bd4513e62025E6",
+  "StakedFYUSD": "0x15f7321f015725E80503A8230E9322901c3e815d",
   "SettingManagement": "0x7bD03a255837c231E7B3A1DD95665Bcd60361BA2",
   "RUSD": "0x16b0aB78B9f37747a9C088C89E74CB4eC67BB259",
   "FYP": "0xF22f42FBD3BEFc31Cfb3aC66EEC4115cfA9A9932",
