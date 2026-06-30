@@ -96,6 +96,14 @@ contract FypherPerpsClearinghouse {
     /// @dev PH-7: minimal non-reentrancy guard (1 = unlocked, 2 = entered).
     uint256 private _reentrancy = 1;
 
+    /// @notice PH-3: optional liquidation incentive paid to the liquidator from
+    ///         the insurance fund. `liquidationRewardBps` defaults to 0 (off);
+    ///         MAX_LIQUIDATION_REWARD_BPS caps the setting; maxLiquidationRewardE18
+    ///         == 0 means no absolute cap.
+    uint32 public liquidationRewardBps;
+    uint256 public maxLiquidationRewardE18;
+    uint32 private constant MAX_LIQUIDATION_REWARD_BPS = 500; // 5% hard ceiling
+
     // ─────────────────────────────────────────────────────────────────────
     // PH-1: account authorisation (EIP-712) for relayer-submitted trades.
     //
@@ -162,6 +170,8 @@ contract FypherPerpsClearinghouse {
     event PositionLiquidated(address indexed account, bytes32 indexed marketId, uint256 markPriceE18, int256 realizedPnlE18);
     event TradingPausedSet(bool paused);
     event LiquidationPausedSet(bool paused);
+    event LiquidationRewardSet(uint32 bps, uint256 maxRewardE18);
+    event LiquidationRewardPaid(address indexed liquidator, bytes32 indexed marketId, uint256 amountE18);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -226,6 +236,15 @@ contract FypherPerpsClearinghouse {
     function setLiquidationPaused(bool paused) external onlyOwner {
         liquidationPaused = paused;
         emit LiquidationPausedSet(paused);
+    }
+
+    /// @notice PH-3: configure the liquidation reward — `bps` of the liquidated
+    ///         notional, with an optional absolute E18 cap. Owner only; bps ≤ 5%.
+    function setLiquidationReward(uint32 bps, uint256 maxRewardE18) external onlyOwner {
+        require(bps <= MAX_LIQUIDATION_REWARD_BPS, "reward bps too high");
+        liquidationRewardBps = bps;
+        maxLiquidationRewardE18 = maxRewardE18;
+        emit LiquidationRewardSet(bps, maxRewardE18);
     }
 
     /**
@@ -512,7 +531,28 @@ contract FypherPerpsClearinghouse {
             emit InsuranceFundDrawn(account, marketId, deficit);
         }
 
+        // PH-3: pay a capped liquidation reward from the insurance fund (only if
+        // configured AND affordable from the post-deficit balance — so it can
+        // never push the fund negative or exacerbate a shortfall).
+        _payLiquidationReward(position.sizeE18, markPriceE18, marketId);
+
         emit PositionLiquidated(account, marketId, markPriceE18, realizedPnlE18);
+    }
+
+    function _payLiquidationReward(uint256 sizeE18, uint256 markPriceE18, bytes32 marketId) internal {
+        if (liquidationRewardBps == 0 || address(insuranceFund) == address(0)) {
+            return;
+        }
+        uint256 rewardE18 = (_calculateNotional(sizeE18, markPriceE18) * liquidationRewardBps) / 10_000;
+        if (maxLiquidationRewardE18 != 0 && rewardE18 > maxLiquidationRewardE18) {
+            rewardE18 = maxLiquidationRewardE18;
+        }
+        uint256 rewardTokens = rewardE18 / collateralScale; // floor to token granularity
+        if (rewardTokens == 0 || insuranceFund.balance() < rewardTokens) {
+            return;
+        }
+        insuranceFund.withdraw(msg.sender, rewardTokens, marketId);
+        emit LiquidationRewardPaid(msg.sender, marketId, rewardTokens * collateralScale);
     }
 
     function getConfiguredMarkets() external view returns (bytes32[] memory) {
