@@ -507,7 +507,34 @@ contract FypherPerpsClearinghouse {
     function liquidate(address account, bytes32 marketId) external onlyLiquidator nonReentrant {
         require(!liquidationPaused, "liquidation paused"); // PH-5
         require(isLiquidatable(account), "account healthy");
+        _liquidateMarket(account, marketId);
+    }
 
+    /**
+     * @notice PH-10: wind down ALL of a cross-margin account's positions until it
+     *         is healthy again. {liquidate} closes only one market, so a
+     *         multi-market account could remain unhealthy after a single call.
+     *         Positions are closed one at a time and health is re-checked after
+     *         each, stopping as soon as the account is solvent — no over-liquidation.
+     */
+    function liquidateAll(address account) external onlyLiquidator nonReentrant {
+        require(!liquidationPaused, "liquidation paused");
+        require(isLiquidatable(account), "account healthy");
+        bytes32[] memory marketList = accountMarkets[account];
+        for (uint256 i = 0; i < marketList.length; i++) {
+            if (positions[account][marketList[i]].sizeE18 == 0) {
+                continue;
+            }
+            _liquidateMarket(account, marketList[i]);
+            if (!isLiquidatable(account)) {
+                break; // healthy again — stop before over-liquidating
+            }
+        }
+    }
+
+    /// @dev Shared liquidation body for {liquidate} / {liquidateAll}. The caller
+    ///      performs the onlyLiquidator + pause + isLiquidatable gating.
+    function _liquidateMarket(address account, bytes32 marketId) internal {
         Position memory position = positions[account][marketId];
         require(position.sizeE18 > 0, "position missing");
 
