@@ -39,6 +39,26 @@ contract FypherPerpsClearinghouse {
         uint256 marginE18;
     }
 
+    /**
+     * @notice PH-1. The account-signed authorisation for a (possibly partially
+     *         filled) trade. The relayer can only move an account's collateral
+     *         into a position the account itself signed for, bounded by
+     *         `maxBaseSizeE18` (cumulative across partial fills), `limitPriceE18`
+     *         (worst acceptable execution price) and `leverageE18`. `nonce` is an
+     *         account-chosen identifier that can be invalidated via
+     *         {cancelOrderNonce}; `deadline` bounds the order's lifetime.
+     */
+    struct TradeOrder {
+        address account;
+        bytes32 marketId;
+        bool isLong;
+        uint256 maxBaseSizeE18;
+        uint256 limitPriceE18; // 0 = market order (no user price cap; oracle band still applies)
+        uint256 leverageE18;
+        uint256 nonce;
+        uint256 deadline;
+    }
+
     address public owner;
     IERC20Minimal public immutable collateralToken;
     IFypherOracleRouter public immutable oracleRouter;
@@ -59,6 +79,38 @@ contract FypherPerpsClearinghouse {
     ///         a deficit-producing liquidation reverts rather than
     ///         silently accruing negative collateral.
     IFypherInsuranceFund public insuranceFund;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // PH-1: account authorisation (EIP-712) for relayer-submitted trades.
+    //
+    // Before PH-1, `executeMatchedTrade` was `onlyRelayer` with NO account
+    // signature: any allow-listed relayer could move ANY depositor's collateral
+    // into a losing position (the only on-chain check was the oracle deviation
+    // band). PH-1 requires every fill to carry the account's EIP-712 signature
+    // over a {TradeOrder}, so a compromised relayer can no longer trade an
+    // account's collateral without that account's authorisation.
+    // ─────────────────────────────────────────────────────────────────────
+    string private constant _EIP712_NAME = "FypherPerpsClearinghouse";
+    string private constant _EIP712_VERSION = "1";
+    bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant _TRADE_ORDER_TYPEHASH = keccak256(
+        "TradeOrder(address account,bytes32 marketId,bool isLong,uint256 maxBaseSizeE18,uint256 limitPriceE18,uint256 leverageE18,uint256 nonce,uint256 deadline)"
+    );
+    /// @dev secp256k1 half-order; signatures with s above this are malleable and rejected (EIP-2).
+    uint256 private constant _SECP256K1_HALF_N =
+        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
+
+    bytes32 private immutable _cachedDomainSeparator;
+    uint256 private immutable _cachedChainId;
+
+    /// @notice Cumulative base size filled against a signed order, keyed by its
+    ///         EIP-712 digest. Bounds partial fills to `TradeOrder.maxBaseSizeE18`
+    ///         and prevents a single signature from being over-filled.
+    mapping(bytes32 => uint256) public orderFilledE18;
+
+    /// @notice Accounts can invalidate an order nonce before/while it is live.
+    mapping(address => mapping(uint256 => bool)) public cancelledOrderNonce;
 
     event OwnerUpdated(address indexed previousOwner, address indexed nextOwner);
     event RelayerUpdated(address indexed relayer, bool allowed);
@@ -84,6 +136,13 @@ contract FypherPerpsClearinghouse {
         uint256 executionPriceE18,
         uint256 requestedLeverageE18
     );
+    event OrderFilled(
+        bytes32 indexed orderHash,
+        address indexed account,
+        uint256 fillSizeE18,
+        uint256 cumulativeFilledE18
+    );
+    event OrderNonceCancelled(address indexed account, uint256 indexed nonce);
     event PositionLiquidated(address indexed account, bytes32 indexed marketId, uint256 markPriceE18, int256 realizedPnlE18);
 
     modifier onlyOwner() {
@@ -107,6 +166,8 @@ contract FypherPerpsClearinghouse {
         owner = msg.sender;
         collateralToken = IERC20Minimal(collateralToken_);
         oracleRouter = IFypherOracleRouter(oracleRouter_);
+        _cachedChainId = block.chainid;
+        _cachedDomainSeparator = _buildDomainSeparator();
         emit OwnerUpdated(address(0), msg.sender);
     }
 
@@ -197,41 +258,165 @@ contract FypherPerpsClearinghouse {
         emit CollateralWithdrawn(msg.sender, amountE18);
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // PH-1: EIP-712 helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// @notice EIP-712 domain separator (recomputed on a fork so a replayed
+    ///         signature from the old chain id is rejected).
+    function domainSeparator() public view returns (bytes32) {
+        if (block.chainid == _cachedChainId) {
+            return _cachedDomainSeparator;
+        }
+        return _buildDomainSeparator();
+    }
+
+    function _buildDomainSeparator() private view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                _EIP712_DOMAIN_TYPEHASH,
+                keccak256(bytes(_EIP712_NAME)),
+                keccak256(bytes(_EIP712_VERSION)),
+                block.chainid,
+                address(this)
+            )
+        );
+    }
+
+    /// @notice The EIP-712 digest an account signs to authorise a {TradeOrder}.
+    function hashOrder(TradeOrder calldata order) public view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                _TRADE_ORDER_TYPEHASH,
+                order.account,
+                order.marketId,
+                order.isLong,
+                order.maxBaseSizeE18,
+                order.limitPriceE18,
+                order.leverageE18,
+                order.nonce,
+                order.deadline
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
+    }
+
+    /// @notice Invalidate one of the caller's order nonces; any order carrying
+    ///         this nonce can no longer be executed (cancel / replace flow).
+    function cancelOrderNonce(uint256 nonce) external {
+        cancelledOrderNonce[msg.sender][nonce] = true;
+        emit OrderNonceCancelled(msg.sender, nonce);
+    }
+
+    /**
+     * @notice Apply a relayer-submitted matched fill against an account-signed
+     *         {TradeOrder}. PH-1: the trade is authorised by `order.account`'s
+     *         EIP-712 signature, bounded by `maxBaseSizeE18` (cumulative across
+     *         partial fills), `limitPriceE18`, `leverageE18`, `nonce` and
+     *         `deadline`. The relayer chooses only the actual `sizeDeltaE18`
+     *         (≤ remaining authorised size) and `executionPriceE18` (within both
+     *         the user's limit and the oracle deviation band).
+     */
     function executeMatchedTrade(
-        address account,
-        bytes32 marketId,
-        bool isLong,
+        TradeOrder calldata order,
+        bytes calldata signature,
         uint256 sizeDeltaE18,
-        uint256 executionPriceE18,
-        uint256 requestedLeverageE18
+        uint256 executionPriceE18
     ) external onlyRelayer {
-        require(account != address(0), "invalid account");
+        bytes32 orderHash = _verifyOrder(order, signature, sizeDeltaE18, executionPriceE18);
+        _applyFill(order, sizeDeltaE18, executionPriceE18);
+        _assertInitialMarginHealthy(order.account);
+        emit TradeApplied(order.account, order.marketId, order.isLong, sizeDeltaE18, executionPriceE18, order.leverageE18);
+        emit OrderFilled(orderHash, order.account, sizeDeltaE18, orderFilledE18[orderHash]);
+    }
+
+    /**
+     * @dev PH-1 authorisation. Validates the account's EIP-712 signature, the
+     *      partial-fill budget (`maxBaseSizeE18`), `deadline`/`nonce`, and the
+     *      user's `limitPriceE18`. Records the cumulative fill and returns the
+     *      order digest. Split out of {executeMatchedTrade} so each frame stays
+     *      within the EVM stack limit (the audit build compiles without via-IR).
+     */
+    function _verifyOrder(
+        TradeOrder calldata order,
+        bytes calldata signature,
+        uint256 sizeDeltaE18,
+        uint256 executionPriceE18
+    ) internal returns (bytes32 orderHash) {
+        require(order.account != address(0), "invalid account");
         require(sizeDeltaE18 > 0, "invalid size");
         require(executionPriceE18 > 0, "invalid execution price");
+        require(block.timestamp <= order.deadline, "order expired");
+        require(!cancelledOrderNonce[order.account][order.nonce], "order cancelled");
 
-        MarketConfig memory config = markets[marketId];
+        // PH-1: the account itself must have authorised this order.
+        orderHash = hashOrder(order);
+        require(_recover(orderHash, signature) == order.account, "bad order signature");
+
+        // Accumulate partial fills against the signed maximum size.
+        uint256 filled = orderFilledE18[orderHash] + sizeDeltaE18;
+        require(filled <= order.maxBaseSizeE18, "order overfilled");
+        orderFilledE18[orderHash] = filled;
+
+        // Honour the user's worst-acceptable price (0 = market: rely on oracle band).
+        if (order.limitPriceE18 != 0) {
+            if (order.isLong) {
+                require(executionPriceE18 <= order.limitPriceE18, "price above limit");
+            } else {
+                require(executionPriceE18 >= order.limitPriceE18, "price below limit");
+            }
+        }
+    }
+
+    /// @dev Validate market/leverage/oracle band, then route the fill to the
+    ///      open/add/reduce/close/flip path.
+    function _applyFill(
+        TradeOrder calldata order,
+        uint256 sizeDeltaE18,
+        uint256 executionPriceE18
+    ) internal {
+        MarketConfig memory config = markets[order.marketId];
         require(config.active, "market inactive");
-        require(requestedLeverageE18 >= 1e18 && requestedLeverageE18 <= config.maxLeverageE18, "invalid leverage");
+        require(order.leverageE18 >= 1e18 && order.leverageE18 <= config.maxLeverageE18, "invalid leverage");
 
-        uint256 oraclePriceE18 = oracleRouter.getPriceE18(marketId);
+        uint256 oraclePriceE18 = oracleRouter.getPriceE18(order.marketId);
         _assertPriceWithinDeviation(executionPriceE18, oraclePriceE18, config.maxTradeDeviationBps);
 
-        Position memory existing = positions[account][marketId];
+        Position memory existing = positions[order.account][order.marketId];
 
         if (existing.sizeE18 == 0) {
-            _openPosition(account, marketId, config, isLong, sizeDeltaE18, executionPriceE18, requestedLeverageE18);
-        } else if (existing.isLong == isLong) {
-            _addToPosition(account, marketId, config, existing, sizeDeltaE18, executionPriceE18, requestedLeverageE18);
+            _openPosition(order.account, order.marketId, config, order.isLong, sizeDeltaE18, executionPriceE18, order.leverageE18);
+        } else if (existing.isLong == order.isLong) {
+            _addToPosition(order.account, order.marketId, config, existing, sizeDeltaE18, executionPriceE18, order.leverageE18);
         } else if (sizeDeltaE18 < existing.sizeE18) {
-            _reducePosition(account, marketId, existing, sizeDeltaE18, executionPriceE18);
+            _reducePosition(order.account, order.marketId, existing, sizeDeltaE18, executionPriceE18);
         } else if (sizeDeltaE18 == existing.sizeE18) {
-            _closePosition(account, marketId, existing, executionPriceE18);
+            _closePosition(order.account, order.marketId, existing, executionPriceE18);
         } else {
-            _flipPosition(account, marketId, config, existing, isLong, sizeDeltaE18, executionPriceE18, requestedLeverageE18);
+            _flipPosition(order.account, order.marketId, config, existing, order.isLong, sizeDeltaE18, executionPriceE18, order.leverageE18);
         }
+    }
 
-        _assertInitialMarginHealthy(account);
-        emit TradeApplied(account, marketId, isLong, sizeDeltaE18, executionPriceE18, requestedLeverageE18);
+    /**
+     * @dev Strict ECDSA recovery: fixed 65-byte signature, EIP-2 low-s, v ∈ {27,28},
+     *      rejects the zero address. Mirrors {FypherXSettlement} so both contracts
+     *      share the same signature-malleability guarantees.
+     */
+    function _recover(bytes32 digest, bytes calldata signature) internal pure returns (address) {
+        require(signature.length == 65, "bad sig length");
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(signature.offset)
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
+        require(uint256(s) <= _SECP256K1_HALF_N, "bad sig s");
+        require(v == 27 || v == 28, "bad sig v");
+        address signer = ecrecover(digest, v, r, s);
+        require(signer != address(0), "bad sig");
+        return signer;
     }
 
     /**

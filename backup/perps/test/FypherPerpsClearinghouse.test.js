@@ -3,6 +3,48 @@ const { ethers } = require("hardhat");
 
 describe("FypherPerpsClearinghouse", function () {
   const marketId = ethers.encodeBytes32String("BTC-PERP");
+
+  // PH-1: executeMatchedTrade now requires the account's EIP-712 signature over a
+  // TradeOrder. These helpers sign a market order (maxBaseSize = exact fill,
+  // limit = 0) so the existing behavioural assertions are unchanged while the
+  // calls go through the new signed path. Each call uses a fresh nonce so the
+  // per-order fill budget never collides within a test.
+  const ORDER_TYPES = {
+    TradeOrder: [
+      { name: "account", type: "address" },
+      { name: "marketId", type: "bytes32" },
+      { name: "isLong", type: "bool" },
+      { name: "maxBaseSizeE18", type: "uint256" },
+      { name: "limitPriceE18", type: "uint256" },
+      { name: "leverageE18", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+  };
+  let _nonce = 0;
+
+  async function execTrade(clearinghouse, sender, account, isLong, sizeE18, priceE18, leverageE18) {
+    const order = {
+      account: account.address,
+      marketId,
+      isLong,
+      maxBaseSizeE18: sizeE18,
+      limitPriceE18: 0n,
+      leverageE18,
+      nonce: BigInt(++_nonce),
+      deadline: 2_000_000_000n,
+    };
+    const net = await ethers.provider.getNetwork();
+    const domain = {
+      name: "FypherPerpsClearinghouse",
+      version: "1",
+      chainId: net.chainId,
+      verifyingContract: await clearinghouse.getAddress(),
+    };
+    const sig = await account.signTypedData(domain, ORDER_TYPES, order);
+    return clearinghouse.connect(sender).executeMatchedTrade(order, sig, sizeE18, priceE18);
+  }
+
   async function deployFixture() {
     const [owner, relayer, liquidator, trader, secondTrader, outsider] = await ethers.getSigners();
 
@@ -52,23 +94,8 @@ describe("FypherPerpsClearinghouse", function () {
     const { relayer, trader, clearinghouse } = await deployFixture();
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("10000", 18));
 
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address,
-      marketId,
-      true,
-      ethers.parseUnits("0.1", 18),
-      ethers.parseUnits("60000", 18),
-      ethers.parseUnits("5", 18)
-    );
-
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address,
-      marketId,
-      false,
-      ethers.parseUnits("0.15", 18),
-      ethers.parseUnits("65000", 18),
-      ethers.parseUnits("4", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
+    await execTrade(clearinghouse, relayer, trader, false, ethers.parseUnits("0.15", 18), ethers.parseUnits("65000", 18), ethers.parseUnits("4", 18));
 
     const position = await clearinghouse.positions(trader.address, marketId);
     assert.equal(position.isLong, false);
@@ -82,40 +109,21 @@ describe("FypherPerpsClearinghouse", function () {
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("5000", 18));
 
     await assert.rejects(
-      clearinghouse.connect(outsider).executeMatchedTrade(
-        trader.address,
-        marketId,
-        true,
-        ethers.parseUnits("0.05", 18),
-        ethers.parseUnits("60000", 18),
-        ethers.parseUnits("5", 18)
-      )
-    , /not relayer/);
+      execTrade(clearinghouse, outsider, trader, true, ethers.parseUnits("0.05", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)),
+      /not relayer/
+    );
 
     await assert.rejects(
-      clearinghouse.connect(relayer).executeMatchedTrade(
-        trader.address,
-        marketId,
-        true,
-        ethers.parseUnits("0.05", 18),
-        ethers.parseUnits("60000", 18),
-        ethers.parseUnits("25", 18)
-      )
-    , /invalid leverage/);
+      execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.05", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("25", 18)),
+      /invalid leverage/
+    );
   });
 
   it("blocks withdrawals that would violate initial margin requirements", async function () {
     const { relayer, trader, clearinghouse } = await deployFixture();
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("2000", 18));
 
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address,
-      marketId,
-      true,
-      ethers.parseUnits("0.1", 18),
-      ethers.parseUnits("60000", 18),
-      ethers.parseUnits("5", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
 
     await assert.rejects(
       clearinghouse.connect(trader).withdraw(ethers.parseUnits("1000", 18))
@@ -126,27 +134,13 @@ describe("FypherPerpsClearinghouse", function () {
     const { relayer, liquidator, trader, oracle, clearinghouse } = await deployFixture();
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("2000", 18));
 
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address,
-      marketId,
-      true,
-      ethers.parseUnits("0.5", 18),
-      ethers.parseUnits("60000", 18),
-      ethers.parseUnits("20", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.5", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("20", 18));
 
     await ethers.provider.send("evm_increaseTime", [301]);
     await ethers.provider.send("evm_mine", []);
 
     await assert.rejects(
-      clearinghouse.connect(relayer).executeMatchedTrade(
-        trader.address,
-        marketId,
-        true,
-        ethers.parseUnits("0.01", 18),
-        ethers.parseUnits("60010", 18),
-        ethers.parseUnits("20", 18)
-      )
+      execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.01", 18), ethers.parseUnits("60010", 18), ethers.parseUnits("20", 18))
     , /stale oracle price/);
 
     await oracle.setLatestAnswer(57000n * 10n ** 8n);
@@ -183,14 +177,7 @@ describe("FypherPerpsClearinghouse", function () {
     // A drop to $52000 produces a realized PnL of −$4000, exceeding the
     // collateral by $2000 — the exact figure the fund must cover.
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("2000", 18));
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address,
-      marketId,
-      true,
-      ethers.parseUnits("0.5", 18),
-      ethers.parseUnits("60000", 18),
-      ethers.parseUnits("20", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.5", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("20", 18));
 
     await oracle.setLatestAnswer(52000n * 10n ** 8n);
     assert.equal(await clearinghouse.isLiquidatable(trader.address), true);
@@ -216,14 +203,7 @@ describe("FypherPerpsClearinghouse", function () {
     const { relayer, liquidator, trader, oracle, clearinghouse } = await deployFixture();
 
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("2000", 18));
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address,
-      marketId,
-      true,
-      ethers.parseUnits("0.5", 18),
-      ethers.parseUnits("60000", 18),
-      ethers.parseUnits("20", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.5", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("20", 18));
     await oracle.setLatestAnswer(52000n * 10n ** 8n);
 
     await assert.rejects(
@@ -247,14 +227,7 @@ describe("FypherPerpsClearinghouse", function () {
     await vault.connect(owner).deposit(seedAmount, ethers.id("seed-too-small"));
 
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("2000", 18));
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address,
-      marketId,
-      true,
-      ethers.parseUnits("0.5", 18),
-      ethers.parseUnits("60000", 18),
-      ethers.parseUnits("20", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.5", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("20", 18));
     await oracle.setLatestAnswer(52000n * 10n ** 8n);
 
     await assert.rejects(
@@ -352,10 +325,7 @@ describe("FypherPerpsClearinghouse", function () {
   it("getAccountMarkets lists market after opening a position", async function () {
     const { relayer, trader, clearinghouse } = await deployFixture();
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("5000", 18));
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address, marketId, true,
-      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
     const acctMarkets = await clearinghouse.getAccountMarkets(trader.address);
     assert.equal(acctMarkets.length, 1);
     assert.equal(acctMarkets[0], marketId);
@@ -364,10 +334,7 @@ describe("FypherPerpsClearinghouse", function () {
   it("getAccountSnapshot reflects position state correctly", async function () {
     const { relayer, trader, clearinghouse } = await deployFixture();
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("5000", 18));
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address, marketId, true,
-      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
     const snap = await clearinghouse.getAccountSnapshot(trader.address);
     assert.ok(snap.collateralE18 > 0n, "collateral should be positive");
     assert.equal(snap.liquidatable, false);
@@ -377,20 +344,14 @@ describe("FypherPerpsClearinghouse", function () {
   it("isLiquidatable returns false for a healthy account", async function () {
     const { relayer, trader, clearinghouse } = await deployFixture();
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("10000", 18));
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address, marketId, true,
-      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
     assert.equal(await clearinghouse.isLiquidatable(trader.address), false);
   });
 
   it("rejects liquidation of a healthy account", async function () {
     const { relayer, liquidator, trader, clearinghouse } = await deployFixture();
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("10000", 18));
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address, marketId, true,
-      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
     await assert.rejects(
       clearinghouse.connect(liquidator).liquidate(trader.address, marketId),
       /account healthy/
@@ -403,23 +364,14 @@ describe("FypherPerpsClearinghouse", function () {
     await clearinghouse.connect(trader).deposit(ethers.parseUnits("10000", 18));
 
     // open 0.2 BTC long
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address, marketId, true,
-      ethers.parseUnits("0.2", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.2", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
     // reduce by 0.1
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address, marketId, false,
-      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, false, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
     let pos = await clearinghouse.positions(trader.address, marketId);
     assert.equal(pos.sizeE18, ethers.parseUnits("0.1", 18));
 
     // close remaining
-    await clearinghouse.connect(relayer).executeMatchedTrade(
-      trader.address, marketId, false,
-      ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
-    );
+    await execTrade(clearinghouse, relayer, trader, false, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18));
     pos = await clearinghouse.positions(trader.address, marketId);
     assert.equal(pos.sizeE18, 0n);
   });
@@ -436,10 +388,7 @@ describe("FypherPerpsClearinghouse", function () {
     );
 
     await assert.rejects(
-      clearinghouse.connect(relayer).executeMatchedTrade(
-        trader.address, marketId, true,
-        ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)
-      ),
+      execTrade(clearinghouse, relayer, trader, true, ethers.parseUnits("0.1", 18), ethers.parseUnits("60000", 18), ethers.parseUnits("5", 18)),
       /market inactive/
     );
   });
