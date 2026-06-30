@@ -5,6 +5,7 @@ interface IERC20Minimal {
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function approve(address spender, uint256 amount) external returns (bool);
+    function decimals() external view returns (uint8);
 }
 
 interface IFypherOracleRouter {
@@ -62,6 +63,11 @@ contract FypherPerpsClearinghouse {
     address public owner;
     IERC20Minimal public immutable collateralToken;
     IFypherOracleRouter public immutable oracleRouter;
+
+    /// @notice PH-2: 1e18 / 10**decimals — bridges the E18 internal ledger and
+    ///         the collateral token's native units (1e12 for 6-dec USDC/USDT;
+    ///         1 for an 18-dec token, so 18-dec behaviour is unchanged).
+    uint256 public immutable collateralScale;
 
     mapping(address => bool) public relayers;
     mapping(address => bool) public liquidators;
@@ -165,6 +171,9 @@ contract FypherPerpsClearinghouse {
         require(oracleRouter_ != address(0), "invalid oracle router");
         owner = msg.sender;
         collateralToken = IERC20Minimal(collateralToken_);
+        uint8 dec = IERC20Minimal(collateralToken_).decimals();
+        require(dec <= 18, "collateral decimals > 18");
+        collateralScale = 10 ** (18 - uint256(dec));
         oracleRouter = IFypherOracleRouter(oracleRouter_);
         _cachedChainId = block.chainid;
         _cachedDomainSeparator = _buildDomainSeparator();
@@ -242,19 +251,24 @@ contract FypherPerpsClearinghouse {
 
     function deposit(uint256 amountE18) external {
         require(amountE18 > 0, "invalid deposit");
-        require(collateralToken.transferFrom(msg.sender, address(this), amountE18), "transfer failed");
+        // PH-2: amount is E18 (ledger units); the on-chain transfer is in the
+        // token's native units. Require E18-to-token alignment so no value is
+        // silently truncated (for an 18-dec token collateralScale==1, a no-op).
+        require(amountE18 % collateralScale == 0, "amount not token-aligned");
+        require(collateralToken.transferFrom(msg.sender, address(this), amountE18 / collateralScale), "transfer failed");
         collateralBalanceE18[msg.sender] += int256(amountE18);
         emit CollateralDeposited(msg.sender, amountE18);
     }
 
     function withdraw(uint256 amountE18) external {
         require(amountE18 > 0, "invalid withdraw");
+        require(amountE18 % collateralScale == 0, "amount not token-aligned"); // PH-2
         require(collateralBalanceE18[msg.sender] >= int256(amountE18), "insufficient collateral");
 
         collateralBalanceE18[msg.sender] -= int256(amountE18);
         _assertInitialMarginHealthy(msg.sender);
 
-        require(collateralToken.transfer(msg.sender, amountE18), "transfer failed");
+        require(collateralToken.transfer(msg.sender, amountE18 / collateralScale), "transfer failed");
         emit CollateralWithdrawn(msg.sender, amountE18);
     }
 
@@ -454,8 +468,12 @@ contract FypherPerpsClearinghouse {
             uint256 deficit = uint256(-finalBalance);
             address fund = address(insuranceFund);
             require(fund != address(0), "no insurance fund");
-            require(insuranceFund.balance() >= deficit, "insurance underfunded");
-            insuranceFund.withdraw(address(this), deficit, marketId);
+            // PH-2: the vault holds the collateral token in native units. Draw
+            // ceil(deficit / scale) token units so the E18 deficit is fully
+            // covered (any sub-token remainder stays as protocol surplus).
+            uint256 deficitTokens = (deficit + collateralScale - 1) / collateralScale;
+            require(insuranceFund.balance() >= deficitTokens, "insurance underfunded");
+            insuranceFund.withdraw(address(this), deficitTokens, marketId);
             collateralBalanceE18[account] = 0;
             emit InsuranceFundDrawn(account, marketId, deficit);
         }
