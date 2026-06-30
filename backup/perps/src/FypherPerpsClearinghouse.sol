@@ -93,6 +93,9 @@ contract FypherPerpsClearinghouse {
     bool public tradingPaused;
     bool public liquidationPaused;
 
+    /// @dev PH-7: minimal non-reentrancy guard (1 = unlocked, 2 = entered).
+    uint256 private _reentrancy = 1;
+
     // ─────────────────────────────────────────────────────────────────────
     // PH-1: account authorisation (EIP-712) for relayer-submitted trades.
     //
@@ -173,6 +176,14 @@ contract FypherPerpsClearinghouse {
     modifier onlyLiquidator() {
         require(liquidators[msg.sender] || relayers[msg.sender], "not liquidator");
         _;
+    }
+
+    /// @dev PH-7: non-reentrancy guard on every collateral-moving entrypoint.
+    modifier nonReentrant() {
+        require(_reentrancy != 2, "reentrant");
+        _reentrancy = 2;
+        _;
+        _reentrancy = 1;
     }
 
     constructor(address collateralToken_, address oracleRouter_) {
@@ -270,18 +281,18 @@ contract FypherPerpsClearinghouse {
         );
     }
 
-    function deposit(uint256 amountE18) external {
+    function deposit(uint256 amountE18) external nonReentrant {
         require(amountE18 > 0, "invalid deposit");
         // PH-2: amount is E18 (ledger units); the on-chain transfer is in the
         // token's native units. Require E18-to-token alignment so no value is
         // silently truncated (for an 18-dec token collateralScale==1, a no-op).
         require(amountE18 % collateralScale == 0, "amount not token-aligned");
-        require(collateralToken.transferFrom(msg.sender, address(this), amountE18 / collateralScale), "transfer failed");
+        _safeTransferFrom(msg.sender, address(this), amountE18 / collateralScale); // PH-7
         collateralBalanceE18[msg.sender] += int256(amountE18);
         emit CollateralDeposited(msg.sender, amountE18);
     }
 
-    function withdraw(uint256 amountE18) external {
+    function withdraw(uint256 amountE18) external nonReentrant {
         require(amountE18 > 0, "invalid withdraw");
         require(amountE18 % collateralScale == 0, "amount not token-aligned"); // PH-2
         require(collateralBalanceE18[msg.sender] >= int256(amountE18), "insufficient collateral");
@@ -289,7 +300,7 @@ contract FypherPerpsClearinghouse {
         collateralBalanceE18[msg.sender] -= int256(amountE18);
         _assertInitialMarginHealthy(msg.sender);
 
-        require(collateralToken.transfer(msg.sender, amountE18 / collateralScale), "transfer failed");
+        _safeTransfer(msg.sender, amountE18 / collateralScale); // PH-7
         emit CollateralWithdrawn(msg.sender, amountE18);
     }
 
@@ -357,7 +368,7 @@ contract FypherPerpsClearinghouse {
         bytes calldata signature,
         uint256 sizeDeltaE18,
         uint256 executionPriceE18
-    ) external onlyRelayer {
+    ) external onlyRelayer nonReentrant {
         require(!tradingPaused, "trading paused"); // PH-5
         bytes32 orderHash = _verifyOrder(order, signature, sizeDeltaE18, executionPriceE18);
         _applyFill(order, sizeDeltaE18, executionPriceE18);
@@ -474,7 +485,7 @@ contract FypherPerpsClearinghouse {
      *          liquidation REVERTS so the operator can route to a
      *          backstop process rather than booking dead value.
      */
-    function liquidate(address account, bytes32 marketId) external onlyLiquidator {
+    function liquidate(address account, bytes32 marketId) external onlyLiquidator nonReentrant {
         require(!liquidationPaused, "liquidation paused"); // PH-5
         require(isLiquidatable(account), "account healthy");
 
@@ -748,5 +759,20 @@ contract FypherPerpsClearinghouse {
         }
         accountMarketSeen[account][marketId] = true;
         accountMarkets[account].push(marketId);
+    }
+
+    /// @dev PH-7: ERC-20 transfer/transferFrom that tolerates non-standard
+    ///      tokens which return no value (e.g. USDT). Reverts unless the call
+    ///      succeeded AND (returned nothing OR returned true).
+    function _safeTransfer(address to, uint256 amount) internal {
+        (bool ok, bytes memory data) = address(collateralToken).call(
+            abi.encodeWithSelector(collateralToken.transfer.selector, to, amount));
+        require(ok && (data.length == 0 || abi.decode(data, (bool))), "transfer failed");
+    }
+
+    function _safeTransferFrom(address from, address to, uint256 amount) internal {
+        (bool ok, bytes memory data) = address(collateralToken).call(
+            abi.encodeWithSelector(collateralToken.transferFrom.selector, from, to, amount));
+        require(ok && (data.length == 0 || abi.decode(data, (bool))), "transferFrom failed");
     }
 }

@@ -118,6 +118,7 @@ contract FypherXSettlement {
      * @dev April-audit H-5 patch. Both keys are required.
      */
     function settleTrade(Trade calldata trade, bytes calldata signature) external onlyRelayer {
+        require(trade.tradeId != bytes32(0), "invalid tradeId"); // PH-7: 0 can't be deduped
         require(!settledTrades[trade.tradeId], "trade already settled");
         require(tradeSigner != address(0), "signer unset");
 
