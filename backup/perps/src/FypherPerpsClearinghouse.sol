@@ -86,6 +86,13 @@ contract FypherPerpsClearinghouse {
     ///         silently accruing negative collateral.
     IFypherInsuranceFund public insuranceFund;
 
+    /// @notice PH-5: independent clearinghouse kill-switches. Unlike the oracle
+    ///         router's pause (which froze new trades AND liquidations at once),
+    ///         these are separate so the book can be wound down: trading can be
+    ///         halted while liquidations continue.
+    bool public tradingPaused;
+    bool public liquidationPaused;
+
     // ─────────────────────────────────────────────────────────────────────
     // PH-1: account authorisation (EIP-712) for relayer-submitted trades.
     //
@@ -150,6 +157,8 @@ contract FypherPerpsClearinghouse {
     );
     event OrderNonceCancelled(address indexed account, uint256 indexed nonce);
     event PositionLiquidated(address indexed account, bytes32 indexed marketId, uint256 markPriceE18, int256 realizedPnlE18);
+    event TradingPausedSet(bool paused);
+    event LiquidationPausedSet(bool paused);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -194,6 +203,18 @@ contract FypherPerpsClearinghouse {
     function setLiquidator(address liquidator, bool allowed) external onlyOwner {
         liquidators[liquidator] = allowed;
         emit LiquidatorUpdated(liquidator, allowed);
+    }
+
+    /// @notice PH-5: pause new trades (existing positions can still be liquidated).
+    function setTradingPaused(bool paused) external onlyOwner {
+        tradingPaused = paused;
+        emit TradingPausedSet(paused);
+    }
+
+    /// @notice PH-5: pause liquidations independently of trading.
+    function setLiquidationPaused(bool paused) external onlyOwner {
+        liquidationPaused = paused;
+        emit LiquidationPausedSet(paused);
     }
 
     /**
@@ -337,6 +358,7 @@ contract FypherPerpsClearinghouse {
         uint256 sizeDeltaE18,
         uint256 executionPriceE18
     ) external onlyRelayer {
+        require(!tradingPaused, "trading paused"); // PH-5
         bytes32 orderHash = _verifyOrder(order, signature, sizeDeltaE18, executionPriceE18);
         _applyFill(order, sizeDeltaE18, executionPriceE18);
         _assertInitialMarginHealthy(order.account);
@@ -453,6 +475,7 @@ contract FypherPerpsClearinghouse {
      *          backstop process rather than booking dead value.
      */
     function liquidate(address account, bytes32 marketId) external onlyLiquidator {
+        require(!liquidationPaused, "liquidation paused"); // PH-5
         require(isLiquidatable(account), "account healthy");
 
         Position memory position = positions[account][marketId];
