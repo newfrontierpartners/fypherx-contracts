@@ -34,6 +34,9 @@ contract FypherXInsuranceFundVault {
     IERC20Minimal public immutable token;
     mapping(address => bool) public operators;
 
+    /// @dev PH-7: non-reentrancy guard (1 = unlocked, 2 = entered).
+    uint256 private _reentrancy = 1;
+
     event OperatorUpdated(address indexed operator, bool allowed);
     event FundDeposited(address indexed from, uint256 amount, bytes32 referenceId);
     event FundWithdrawn(address indexed to, uint256 amount, bytes32 referenceId);
@@ -47,6 +50,14 @@ contract FypherXInsuranceFundVault {
     modifier onlyOperator() {
         require(operators[msg.sender], "not operator");
         _;
+    }
+
+    /// @dev PH-7: non-reentrancy guard on token-moving entrypoints.
+    modifier nonReentrant() {
+        require(_reentrancy != 2, "reentrant");
+        _reentrancy = 2;
+        _;
+        _reentrancy = 1;
     }
 
     constructor(address token_, address initialOperator) {
@@ -77,21 +88,34 @@ contract FypherXInsuranceFundVault {
      *         emitted in the event so off-chain reconciliation can tie
      *         the deposit to the originating liquidation / surplus.
      */
-    function deposit(uint256 amount, bytes32 referenceId) external {
+    function deposit(uint256 amount, bytes32 referenceId) external nonReentrant {
         require(amount > 0, "invalid deposit");
-        require(token.transferFrom(msg.sender, address(this), amount), "transfer failed");
+        _safeTransferFrom(msg.sender, address(this), amount); // PH-7
         emit FundDeposited(msg.sender, amount, referenceId);
     }
 
-    function withdraw(address to, uint256 amount, bytes32 referenceId) external onlyOperator {
+    function withdraw(address to, uint256 amount, bytes32 referenceId) external onlyOperator nonReentrant {
         require(to != address(0), "invalid recipient");
         require(amount > 0, "invalid amount");
         require(token.balanceOf(address(this)) >= amount, "insufficient vault balance");
-        require(token.transfer(to, amount), "withdraw failed");
+        _safeTransfer(to, amount); // PH-7
         emit FundWithdrawn(to, amount, referenceId);
     }
 
     function balance() external view returns (uint256) {
         return token.balanceOf(address(this));
+    }
+
+    /// @dev PH-7: tolerate non-bool-returning ERC-20s (e.g. USDT).
+    function _safeTransfer(address to, uint256 amount) internal {
+        (bool ok, bytes memory data) = address(token).call(
+            abi.encodeWithSelector(token.transfer.selector, to, amount));
+        require(ok && (data.length == 0 || abi.decode(data, (bool))), "withdraw failed");
+    }
+
+    function _safeTransferFrom(address from, address to, uint256 amount) internal {
+        (bool ok, bytes memory data) = address(token).call(
+            abi.encodeWithSelector(token.transferFrom.selector, from, to, amount));
+        require(ok && (data.length == 0 || abi.decode(data, (bool))), "transfer failed");
     }
 }

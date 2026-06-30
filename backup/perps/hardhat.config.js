@@ -37,7 +37,17 @@ subtask(TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS, async (_args, _hre, runSuper) =>
 });
 
 module.exports = {
-  solidity: "0.8.20",
+  solidity: {
+    version: "0.8.20",
+    settings: {
+      // PH-1/2/5 hardening pushed FypherPerpsClearinghouse past the 24KB
+      // EIP-170 contract-size limit with the optimizer off. Enable it — a
+      // >24KB contract cannot be deployed to mainnet regardless, and the alpha
+      // tree already compiles with the optimizer on. Auditors should review
+      // with these exact settings.
+      optimizer: { enabled: true, runs: 200 }
+    }
+  },
   paths: {
     sources: "./src",
     cache: "./cache",
