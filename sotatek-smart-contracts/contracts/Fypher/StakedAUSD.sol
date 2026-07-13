@@ -83,6 +83,9 @@ contract StakedAUSD is
     // FYP-60 patch.
     event APRUpdated(uint256 newAPR);
     event RemainingRewardsUpdated(uint256 amount);
+    /// @notice FYP-78: stranded reward residue swept while the vault held
+    ///         zero shares.
+    event ResidualRewardsRecovered(address indexed to, uint256 amount);
 
     error NotAdmin();
     error NotRewarder();
@@ -97,6 +100,9 @@ contract StakedAUSD is
     error CooldownRequired();
     /// @notice FYP-30 / FYP-43. Cooldown ready or not started.
     error ExistingCooldownReady();
+    /// @notice FYP-78: {recoverResidualRewards} requires every share to be
+    ///         redeemed first (`totalSupply() == 0`).
+    error SharesOutstanding();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -368,6 +374,41 @@ contract StakedAUSD is
 
         remainingRewards += amount;
         emit RewardsReceived(amount);
+    }
+
+    /**
+     * @notice Recover the residual `asset()` balance left stranded in the
+     *         vault after every share has been redeemed. Callable only
+     *         while `totalSupply() == 0`, so depositor backing can never
+     *         be swept through this path.
+     *
+     * @dev FYP-78 patch. If the last holder exits via {cooldownShares}
+     *      while a reward stream is still releasing, the burn is priced on
+     *      `totalAssets()` — which excludes `_unvestedAmount()` — so the
+     *      unreleased remainder stays behind with `totalSupply() == 0` and
+     *      accrues to the ERC-4626 virtual share. Because {rescueTokens}
+     *      and {releaseToken} deliberately refuse `token == asset()`, that
+     *      remainder was previously unrecoverable without an upgrade.
+     *
+     *      The sweep is balance-based rather than `_unvestedAmount()`-based
+     *      so it also recovers the state where the stranded stream has
+     *      already fully released to the virtual share (there
+     *      `_unvestedAmount()` is 0 but the balance persists). At
+     *      `totalSupply() == 0` no shareholder exists, so the entire
+     *      balance is by definition residue. Stream state is reset so a
+     *      later {transferInRewards} starts a clean window.
+     */
+    function recoverResidualRewards(address to) external onlyAdmin nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        if (totalSupply() != 0) revert SharesOutstanding();
+        uint256 amount = IERC20(asset()).balanceOf(address(this));
+        if (amount == 0) revert ZeroAmount();
+
+        vestingAmount = 0;
+        _lastDistributionTimestamp = block.timestamp;
+
+        IERC20(asset()).safeTransfer(to, amount);
+        emit ResidualRewardsRecovered(to, amount);
     }
 
     function setCurrentAPY(uint256 newAPR) external onlyAdmin {
