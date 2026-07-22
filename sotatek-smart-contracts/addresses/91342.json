@@ -1,0 +1,23 @@
+{
+  "_comment": "GIWA Sepolia (chainId 91342) — Dunamu/Upbit OP-Stack L2 testnet. Backs the `giwa` environment at giwa.fypherfi.com. Unlike HOODI and mainnet, this deployment is FULLY SELF-CONTAINED: there is no BitGo custody and no Concrete vault on GIWA, so FYUSD is issued by our own on-chain FyusdTeller against MockERC20 test stables, and Earn yield comes from MockConcreteAdapter instead of the real Concrete integration. Populated by scripts/deploy-giwa-phase0.js, then scripts/deploy-phase1.js and scripts/deploy-yield-vaults.js (both chain-generic). See scripts/deploy-giwa.js for the full runbook.",
+  "_explorer": "https://sepolia-explorer.giwa.io",
+  "_rpc": "https://sepolia-rpc.giwa.io",
+  "SettingManagement": "0xF0CdB23F094F79B9596e81F47438C96DecC1764b",
+  "RUSD": "0xaF751E31D5926b8e90cEC81ff42E0B2F282c8283",
+  "FYP": "0x2fFBAa1153fDF32a6f2a0267c32e10944Bb46b80",
+  "FYUSD": "0x7DBf16ECE2238fC8d4bfEB46058Ee2eC7BFd9057",
+  "USDT": "0xD7169908eeF2e0DA574256F1E0231Fa36814D751",
+  "USDC": "0xD6e14Bc57A2a5CB263C359aBBeb0ec424F6a2B53",
+  "FypherMinting": "0xF4Dc5A86863064927FAbfE8e227BE62E28450912",
+  "MockConcreteAdapter": "0xeDfdc6F1d369D2dC03F8c736B2902a1AC9d622CC",
+  "FypherBurnQueue": "0x2B7330e6C39C0B428F2C1362843c1c3dEe0A3588",
+  "FyusdEpochSettlement": "0xE6E8A7f0Dcc78432909c567392ab631Eb7f1eFB8",
+  "FypherStakingHub": "0xfa5AB05AC0D8485850175eF60717A2D0cc68cf73",
+  "FyusdYieldVault": "0x911243eB55C49fBCe0d5795C40718bD080F564Fc",
+  "FypherCircuitBreaker": "0x15844cA60C8ff139C3Be485500f8498cAa726e42",
+  "FyusdTeller": "0x8d1e675dd4A229f66f64C1B1324b8acd8365d1F1",
+  "MockConcreteAdapterFyusd": "0x3C0966F6B576869D0d0fa13Cdf50eDaD1F1F68cE",
+  "MockConcreteAdapterRusd": "0x908038d86d5bEeDD81c5312B27E6f7D95d743212",
+  "FyusdYieldVaultErc4626": "0xFC96926e84902C006F5280376d3fDCF6E381119B",
+  "RUSDYieldVault": "0x739A2E6Bc57628C991e478547f1B5A280839FD01"
+}
