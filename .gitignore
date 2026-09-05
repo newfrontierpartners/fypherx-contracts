@@ -31,3 +31,10 @@ contracts/typechain-types/
 
 /tmp/
 docs/benchmarks/raw/fypherx.env.snapshot
+
+# Build caches and agent scratch state. Both had leaked into the tree, and
+# this repo is public — a compiler cache carries the absolute paths of whoever
+# ran the build.
+cache/
+*/cache/
+.omc/

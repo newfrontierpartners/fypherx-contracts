@@ -22,7 +22,7 @@ const ONE = 10n ** 18n;
 async function main() {
   const [deployer, alice, bob, liquidator] = await ethers.getSigners();
 
-  // Loan + collateral mocks (ERC20Mock from sotatek set). We deploy fresh ones via OZ ERC20.
+  // Loan + collateral mocks (ERC20Mock from the inherited set). We deploy fresh ones via OZ ERC20.
   const MockERC20 = await ethers.getContractFactory("contracts/mocks/MockERC20.sol:MockERC20");
   const rusd = await MockERC20.deploy("RUSD", "RUSD", 18);
   const usdt = await MockERC20.deploy("USDT", "USDT", 18);

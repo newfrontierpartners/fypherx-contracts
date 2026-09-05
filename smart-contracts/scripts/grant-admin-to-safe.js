@@ -42,7 +42,7 @@
  *     EpochScheduler daemon. Deferred.
  *
  * Usage:
- *   cd sotatek-smart-contracts
+ *   cd smart-contracts
  *   npx hardhat run scripts/grant-admin-to-safe.js --network sepolia
  */
 

@@ -3,9 +3,9 @@
 > Per ADR-007 §"Signer sets". Copy this file to **gitignored**
 > per-environment JSON files at the contracts repo root:
 >
->   - `sotatek-smart-contracts/multisig-signers.bscTestnet.json`
->   - `sotatek-smart-contracts/multisig-signers.sepolia.json`
->   - `sotatek-smart-contracts/multisig-signers.mainnet.json`
+>   - `smart-contracts/multisig-signers.bscTestnet.json`
+>   - `smart-contracts/multisig-signers.sepolia.json`
+>   - `smart-contracts/multisig-signers.mainnet.json`
 >
 > The `multisig-signers.*.json` glob is in `.gitignore` (verify before
 > populating).

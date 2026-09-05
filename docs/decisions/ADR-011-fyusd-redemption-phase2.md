@@ -2,7 +2,7 @@
 
 - Status: Accepted (contract layer implemented; backend + UI follow-on PRs in flight)
 - Date: 2026-05-08
-- Implementation: `FyusdEpochRedemption.sol` (sotatek-smart-contracts/contracts/Fypher/)
+- Implementation: `FyusdEpochRedemption.sol` (smart-contracts/contracts/Fypher/)
 - Resolves: fypherx-frontend `docs/alpha-launch-flows-coverage.md` §7 ("FYUSD redemption to USDT/USDC")
 - Trap report: fypherx-frontend PR #158 (FYUSD "Burn" trap)
 - Related: ADR-005 (Bitgo Prime mint), ADR-001 (RUSD burn-queue), ADR-006 (Concrete adapter)

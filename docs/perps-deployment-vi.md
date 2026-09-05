@@ -1,6 +1,6 @@
 # FypherX Perps — Tài liệu deploy BSC Testnet
 
-Đi kèm với [`admin-model.md`](./admin-model.md). Phạm vi: bốn contract **perpetual-derivatives** trong `contracts/src/` đã deploy lên BNB Smart Chain Testnet (chainId **97**), cộng với các mock oracle đi kèm. Về core stablecoin + staking (`sotatek-smart-contracts/`), xem `contracts.md` trong subproject đó.
+Đi kèm với [`admin-model.md`](./admin-model.md). Phạm vi: bốn contract **perpetual-derivatives** trong `contracts/src/` đã deploy lên BNB Smart Chain Testnet (chainId **97**), cộng với các mock oracle đi kèm. Về core stablecoin + staking (`smart-contracts/`), xem `contracts.md` trong subproject đó.
 
 Tài liệu này là điểm bàn giao giữa contracts và các team backend / frontend / ops. Nếu bạn đang wire một service, đọc file này TRƯỚC khi gọi bất kỳ function nào.
 

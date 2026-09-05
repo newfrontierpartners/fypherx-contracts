@@ -7,8 +7,8 @@
 //   4. FypherPerpsClearinghouse   — collateral vault + position ledger
 //
 // For BSC Testnet the collateral token is the pre-deployed RUSD at
-// 0xF3ac96da1edD17bb0e803Ad1d1c9Cbc18b42FaB5 (see sotatek deployed-addresses
-// in fypherx-contracts/sotatek-smart-contracts/deployed-addresses.json).
+// 0xF3ac96da1edD17bb0e803Ad1d1c9Cbc18b42FaB5 (see the inherited deployed-addresses
+// in fypherx-contracts/smart-contracts/deployed-addresses.json).
 // Override with COLLATERAL_TOKEN_ADDRESS for other networks.
 //
 // Env vars:

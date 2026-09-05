@@ -18,7 +18,7 @@ You are joining the Fypher Phase 1 implementation, backend gateway session (S2).
 
 **Working tree**: `/Users/shchoi/Documents/Fypher/fypherx-backend-services/fypherx-gateway/`. Java 17, Spring Boot 3.2.5, Gradle multi-module. PostgreSQL 16 + Redis 7. Web3j 4.10.3 for chain interaction. Branch off `develop`: `feat/phase1-backend`.
 
-**Phase 1 contracts you will integrate against** (deployed by S1, addresses live in `fypherx-contracts/sotatek-smart-contracts/addresses/97.json` for BSC Testnet):
+**Phase 1 contracts you will integrate against** (deployed by S1, addresses live in `fypherx-contracts/smart-contracts/addresses/97.json` for BSC Testnet):
 
 | Contract | What S2 needs from it |
 |---|---|
@@ -73,8 +73,8 @@ You are joining the Fypher Phase 1 implementation, backend gateway session (S2).
 - Migration to EIP-712 typed data for mint signing (already P0, separate track per CLAUDE.md). Note: contracts use EIP-712 since the April audit landed; the backend mint-sign code probably needs to be updated too — flag as a P0 for the next backend session, NOT this S2 work, unless the user explicitly requests it.
 
 **Key on-chain context**:
-- Active deploy: BSC Testnet (chainId 97). Per-chain addresses at `fypherx-contracts/sotatek-smart-contracts/addresses/97.json`.
-- Deployer EOA: `0x31B60b11533c97b5ED7b1B650D31855F3754Acb4`. Private key in `sotatek-smart-contracts/.env` `PRIVATE_KEY`. This is the same key as the backend `BACKEND_SIGNER_PRIVATE_KEY` and `BACKEND_EXECUTOR_PRIVATE_KEY` defaults.
-- ABI files: re-export from `sotatek-smart-contracts/artifacts/contracts/Fypher/{...}.sol/{...}.json` after `npx hardhat compile`. The backend uses Web3j `Contract.deployedAt(...)` style binding.
+- Active deploy: BSC Testnet (chainId 97). Per-chain addresses at `fypherx-contracts/smart-contracts/addresses/97.json`.
+- Deployer EOA: `0x31B60b11533c97b5ED7b1B650D31855F3754Acb4`. Private key in `smart-contracts/.env` `PRIVATE_KEY`. This is the same key as the backend `BACKEND_SIGNER_PRIVATE_KEY` and `BACKEND_EXECUTOR_PRIVATE_KEY` defaults.
+- ABI files: re-export from `smart-contracts/artifacts/contracts/Fypher/{...}.sol/{...}.json` after `npx hardhat compile`. The backend uses Web3j `Contract.deployedAt(...)` style binding.
 
 Begin by reading the docs and confirming the plan.

@@ -84,7 +84,7 @@ Anyone can mint these tokens for testing: `mint(address to, uint256 amount)`.
 ## Commands
 
 ```bash
-cd sotatek-smart-contracts
+cd smart-contracts
 npm run compile            # Compile all contracts
 npm run deploy:testnet     # Deploy to BSC Testnet
 node setup-contracts.js    # Setup contract state (assets, signer, custodian)

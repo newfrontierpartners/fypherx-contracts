@@ -1,6 +1,6 @@
 # Fypher Protocol — Alpha Audit Package
 
-This repository is the smart-contract codebase for the **alpha launch** of the Fypher protocol, prepared for an external security audit. Everything outside the alpha launch scope (lending markets, LP vaults, perpetual derivatives) has been moved into [`backup/`](./backup/) and is **out of scope**; the canonical audit target is [`sotatek-smart-contracts/contracts/`](./sotatek-smart-contracts/contracts/).
+This repository is the smart-contract codebase for the **alpha launch** of the Fypher protocol, prepared for an external security audit. Everything outside the alpha launch scope (lending markets, LP vaults, perpetual derivatives) has been moved into [`backup/`](./backup/) and is **out of scope**; the canonical audit target is [`smart-contracts/contracts/`](./smart-contracts/contracts/).
 
 | Field | Value |
 |---|---|
@@ -9,13 +9,13 @@ This repository is the smart-contract codebase for the **alpha launch** of the F
 | Framework | Hardhat 2.28 + OpenZeppelin Contracts v5.0.2 + `@openzeppelin/hardhat-upgrades` |
 | Upgrade pattern | TransparentUpgradeableProxy (per major contract); proxy admin = deployer EOA |
 | In-scope files | 26 Solidity files / ~5,700 lines (incl. comments) |
-| Tests | 7 suites / 84 unit + invariant tests under `sotatek-smart-contracts/test/` |
-| Source of truth (addresses) | [`sotatek-smart-contracts/deployed-addresses.json`](./sotatek-smart-contracts/deployed-addresses.json) |
+| Tests | 7 suites / 84 unit + invariant tests under `smart-contracts/test/` |
+| Source of truth (addresses) | [`smart-contracts/deployed-addresses.json`](./smart-contracts/deployed-addresses.json) |
 
 ```
 fypherx-contracts/
 ├── README.md                           ← you are here (audit overview)
-├── sotatek-smart-contracts/            ← AUDIT TARGET
+├── smart-contracts/            ← AUDIT TARGET
 │   ├── contracts/
 │   │   ├── Fypher/                     20 production contracts
 │   │   ├── interfaces/                 3 interfaces
@@ -45,7 +45,7 @@ Fypher is a stablecoin and yield protocol built on BSC. End users deposit whitel
 
 ### In scope (audit these)
 
-All files under `sotatek-smart-contracts/contracts/`:
+All files under `smart-contracts/contracts/`:
 
 #### 2.1 Tokens (3 base + 2 vault receipt + 3 staked-receipt)
 
@@ -551,7 +551,7 @@ Every major contract is deployed behind a `TransparentUpgradeableProxy`. The pro
 All pre-existing slots (0..14) are untouched.
 ```
 
-The OZ Upgrades plugin's `unsafeAllow` flags are **not** used in production deploys (verified via the `bsc-testnet.json` registry under `sotatek-smart-contracts/.openzeppelin/`). Auditor should sanity-check the storage compatibility of any in-flight upgrade by running `npx hardhat run scripts/upgrade-{minting,fyusd}-impl.js --network bscTestnet` against a fresh proxy registry.
+The OZ Upgrades plugin's `unsafeAllow` flags are **not** used in production deploys (verified via the `bsc-testnet.json` registry under `smart-contracts/.openzeppelin/`). Auditor should sanity-check the storage compatibility of any in-flight upgrade by running `npx hardhat run scripts/upgrade-{minting,fyusd}-impl.js --network bscTestnet` against a fresh proxy registry.
 
 **Non-upgradeable by design**: `RUSDSilo`, `ReservePool`, `ConcreteAdapterV1`, `MockConcreteAdapter`, `MockERC20`, `PoolMath`. The silo is a minimal-trust escrow; ReservePool is a thin admin contract; the rest are libraries / mocks / stubs.
 
@@ -592,7 +592,7 @@ The audit firm should focus on:
 ### 8.2 Compile
 
 ```bash
-cd sotatek-smart-contracts
+cd smart-contracts
 npm install
 npx hardhat clean
 npx hardhat compile
@@ -645,7 +645,7 @@ BSCSCAN_API_KEY=...                # for verification
 
 ## 9. Deployed addresses (BSC Testnet, chainId 97)
 
-The full registry is in [`sotatek-smart-contracts/deployed-addresses.json`](./sotatek-smart-contracts/deployed-addresses.json). The in-scope contracts are:
+The full registry is in [`smart-contracts/deployed-addresses.json`](./smart-contracts/deployed-addresses.json). The in-scope contracts are:
 
 | Contract | Address |
 |---|---|
@@ -680,8 +680,8 @@ The mock collateral tokens (`USDT`, `USDC`, `WETH`, `BTC`, `BNB` at testnet addr
 | [`docs/admin-model.md`](./docs/admin-model.md) | Privileged-role model + multisig migration plan |
 | [`docs/decisions/`](./docs/decisions/) | Architecture decision records (ADR-001 through ADR-009) |
 | [`docs/GAP_ANALYSIS.md`](./docs/GAP_ANALYSIS.md) | Spec ↔ implementation gap analysis from late-stage Phase 1 |
-| [`sotatek-smart-contracts/contracts.md`](./sotatek-smart-contracts/contracts.md) | Deployed-address registry with BscScan links |
-| [`sotatek-smart-contracts/flows.md`](./sotatek-smart-contracts/flows.md) | Sequence diagrams for each user flow |
+| [`smart-contracts/contracts.md`](./smart-contracts/contracts.md) | Deployed-address registry with BscScan links |
+| [`smart-contracts/flows.md`](./smart-contracts/flows.md) | Sequence diagrams for each user flow |
 | [`backup/README.md`](./backup/README.md) | Out-of-scope contract inventory |
 
 ---

@@ -78,7 +78,7 @@ You are joining the Fypher Phase 1 implementation, admin dashboard session (S3).
 - Concrete adapter swap UI (mainnet-only concern; out of scope until 1.2).
 
 **Key on-chain context**:
-- Active deploy: BSC Testnet (chainId 97). Per-chain addresses at `fypherx-contracts/sotatek-smart-contracts/addresses/97.json` (S1.9 restructure).
+- Active deploy: BSC Testnet (chainId 97). Per-chain addresses at `fypherx-contracts/smart-contracts/addresses/97.json` (S1.9 restructure).
 - The Phase 1 contracts (BurnQueue, StakingHub, EpochSettlement, YieldVault) are merged into the `develop` branch of the contracts repo but **not yet deployed to BSC Testnet** — operator deploy is pending. Until then S3 pages render with the same `UNKNOWN-when-unconfigured` semantics the backend already exposes.
 - Admin app's `addresses.ts` is the parallel source-of-truth file that needs to grow Phase 1 entries once the contracts deploy.
 

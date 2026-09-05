@@ -14,7 +14,7 @@ You are joining the Fypher Phase 1 implementation, smart-contracts session (S1).
 
 **Your scope (S1)**: smart contracts only. Backend (S2) and admin (S3) are separate sessions. Frontend (S4) waits for design handoff.
 
-**Working tree**: `/Users/shchoi/Documents/Fypher/fypherx-contracts/sotatek-smart-contracts/`. Solidity 0.8.22, Hardhat, OpenZeppelin Upgradeable v5. Branch off `develop`: `feat/phase1-contracts`.
+**Working tree**: `/Users/shchoi/Documents/Fypher/fypherx-contracts/smart-contracts/`. Solidity 0.8.22, Hardhat, OpenZeppelin Upgradeable v5. Branch off `develop`: `feat/phase1-contracts`.
 
 **Deliverables (each = own commit + tests)**:
 
@@ -64,7 +64,7 @@ You are joining the Fypher Phase 1 implementation, smart-contracts session (S1).
 
 **Key on-chain context**:
 - Active deploy: BSC Testnet (chainId 97).
-- Deployer EOA: `0x31B60b11533c97b5ED7b1B650D31855F3754Acb4`. Private key in `sotatek-smart-contracts/.env` `PRIVATE_KEY`.
+- Deployer EOA: `0x31B60b11533c97b5ED7b1B650D31855F3754Acb4`. Private key in `smart-contracts/.env` `PRIVATE_KEY`.
 - `FypherMinting` proxy: `0x0Cc3De38A1ff577f23d14a4714530FCc11b24690`.
 - `FYUSD`: `0x3b1f4CA20fCDf837d89b3606900a4e60C3fba6EE`.
 - `FYP`: `0x8Ac0e5C2B3670F78039A7Ea19C9a79Ef28c65a4C`.

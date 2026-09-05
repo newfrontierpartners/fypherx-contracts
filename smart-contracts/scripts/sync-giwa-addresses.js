@@ -5,7 +5,7 @@
  * Rewrites the `// <giwa-addresses>` block in
  *   fypherx-frontend/src/lib/defi/contracts/addresses.ts
  * from
- *   fypherx-contracts/sotatek-smart-contracts/addresses/91342.json
+ *   fypherx-contracts/smart-contracts/addresses/91342.json
  *
  * <p>Why a script and not a copy-paste: the frontend refuses to build while
  * the registry is at the zero-address scaffold (scripts/assert-giwa-addresses.mjs),

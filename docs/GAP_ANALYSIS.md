@@ -5,7 +5,7 @@
 > Generated: 2026-04-26
 > Scope: smart contracts, backend gateway, admin dashboard. Frontend deferred until design handoff.
 > Repos:
-> - `fypherx-contracts/sotatek-smart-contracts/` (Solidity 0.8.22, Hardhat, OZ Upgradeable v5)
+> - `fypherx-contracts/smart-contracts/` (Solidity 0.8.22, Hardhat, OZ Upgradeable v5)
 > - `fypherx-backend-services/` (Java 17, Spring Boot 3.2.5, multi-module Gradle)
 > - `fypherx-admin-dashboard/` (Next.js 16 App Router, wagmi 3.5)
 

@@ -40,7 +40,7 @@
  * back. Plan accordingly.
  *
  * Usage:
- *   cd sotatek-smart-contracts
+ *   cd smart-contracts
  *   npx hardhat run scripts/accept-admin-from-safe.js --network sepolia
  */
 

@@ -291,20 +291,20 @@ PRs are grouped to keep diffs small, review easy, and the storage layout safe un
 ```sh
 # C-1 / C-2: confirm vesting math
 grep -n "totalAssets\|_unvestedAmount\|calculateVestedAmount" \
-  sotatek-smart-contracts/contracts/Fypher/Staked*.sol \
-  sotatek-smart-contracts/contracts/libraries/PoolMath.sol
+  smart-contracts/contracts/Fypher/Staked*.sol \
+  smart-contracts/contracts/libraries/PoolMath.sol
 
 # C-3 / H-2: confirm setSettingManager + initialize ignored param
 grep -n "setSettingManager\|admin_" \
-  sotatek-smart-contracts/contracts/Fypher/Staked*.sol
+  smart-contracts/contracts/Fypher/Staked*.sol
 
 # H-1: confirm requestRedeem nonce omission
 grep -n "_usedNonces\|requestRedeem\|cancelRedeem" \
-  sotatek-smart-contracts/contracts/Fypher/FypherMinting.sol
+  smart-contracts/contracts/Fypher/FypherMinting.sol
 
 # H-3: confirm renounceRole + _roleAdmin
 grep -n "renounceRole\|_roleAdmin" \
-  sotatek-smart-contracts/contracts/Fypher/SingleAdminAccessControl.sol
+  smart-contracts/contracts/Fypher/SingleAdminAccessControl.sol
 
 # H-4 / H-5: perps liquidation + settlement signature
 grep -n "liquidate\|insuranceFund\|signature\|recover" \

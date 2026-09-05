@@ -1,6 +1,6 @@
 # FypherX Perps — BSC Testnet Deployment Reference
 
-Companion to [`admin-model.md`](./admin-model.md). Scope: the four **perpetual-derivatives** contracts deployed under `contracts/src/` on BNB Smart Chain Testnet (chainId **97**), plus their mock oracle fixtures. For the core stablecoin + staking stack (`sotatek-smart-contracts/`), see that subproject's `contracts.md`.
+Companion to [`admin-model.md`](./admin-model.md). Scope: the four **perpetual-derivatives** contracts deployed under `contracts/src/` on BNB Smart Chain Testnet (chainId **97**), plus their mock oracle fixtures. For the core stablecoin + staking stack (`smart-contracts/`), see that subproject's `contracts.md`.
 
 This file is the hand-off surface between contracts and the backend / frontend / ops teams. If you are wiring a service, read this before calling anything.
 

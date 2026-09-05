@@ -21,7 +21,7 @@ does not affect perps, and vice versa.
 
 ## Why two hierarchies
 
-Historical: the staking + mint stack was inherited from the Sotatek
+Historical: the staking + mint stack was inherited from the original external vendor
 codebase and uses an OZ-style role mapping with named roles
 (`REWARDER_ROLE`, `RELEASE_TOKEN_ROLE`, `INSTITUTIONAL_ROLE`, two
 `*_RESTRICTED_STAKER_ROLE`s — the rest were dead code and were

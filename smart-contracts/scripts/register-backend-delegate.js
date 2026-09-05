@@ -44,7 +44,7 @@
  * ADR reference: docs/decisions/ADR-012-operator-multisig-and-gas-relayer.md
  *
  * Usage:
- *   cd sotatek-smart-contracts
+ *   cd smart-contracts
  *   npx hardhat run scripts/register-backend-delegate.js --network sepolia
  *
  * (We use `hardhat run` so the chainId / RPC / dotenv loading match
