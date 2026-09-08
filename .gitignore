@@ -38,3 +38,7 @@ docs/benchmarks/raw/fypherx.env.snapshot
 cache/
 */cache/
 .omc/
+
+# Generated wallet candidates: holds private keys and mnemonics. Never tracked,
+# and this repository is public.
+wallet-candidates.json
