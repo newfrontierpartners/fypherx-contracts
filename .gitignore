@@ -31,3 +31,10 @@ contracts/typechain-types/
 
 /tmp/
 docs/benchmarks/raw/fypherx.env.snapshot
+
+# Generated wallet candidates and raw key material: never tracked, and this
+# repository is public. (Same rule as the giwa branch.)
+wallet-candidates.json
+*.pem
+*.key
+keystore/
