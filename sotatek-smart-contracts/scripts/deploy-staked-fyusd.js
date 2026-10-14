@@ -22,13 +22,19 @@ async function main() {
     : deployer.address;
 
   const net = await ethers.provider.getNetwork();
-  console.log(`[sfyusd] chainId=${net.chainId} deployer=${deployer.address} keeper=${keeper}`);
+  // Name/symbol are env-configurable. PROD is the non-transferable (soulbound)
+  // vFYUSD — keep the symbol "vFYUSD" (matches the old prod token) so wallets and
+  // explorers show the same ticker post-migration.
+  const tokenName   = process.env.TOKEN_NAME   || "Fypher vFYUSD";
+  const tokenSymbol = process.env.TOKEN_SYMBOL || "vFYUSD";
+  console.log(`[vfyusd] chainId=${net.chainId} deployer=${deployer.address} keeper=${keeper}`);
+  console.log(`[vfyusd] deploying "${tokenName}" / ${tokenSymbol} (6-dec, soulbound)`);
 
   const SF = await ethers.getContractFactory("StakedFYUSD");
-  const sf = await SF.deploy("Staked FYUSD", "sFYUSD", 6, deployer.address);
+  const sf = await SF.deploy(tokenName, tokenSymbol, 6, deployer.address);
   await sf.waitForDeployment();
   const addr = await sf.getAddress();
-  console.log(`[sfyusd] deployed at ${addr} (admin=${deployer.address})`);
+  console.log(`[vfyusd] deployed at ${addr} (admin=${deployer.address})`);
 
   for (const role of ["MINTER_ROLE", "BURNER_ROLE", "LOCKER_ROLE", "PAUSER_ROLE"]) {
     const r = await sf[role]();

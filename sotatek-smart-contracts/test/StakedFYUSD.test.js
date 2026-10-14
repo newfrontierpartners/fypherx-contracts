@@ -1,15 +1,16 @@
 /**
- * StakedFYUSD (sFYUSD) tests.
+ * StakedFYUSD tests (deployed on-chain as the soulbound "vFYUSD" receipt).
  *
  * Verifies:
  *   - 6 decimals; keeper-only mint (MINTER_ROLE) and burnByKeeper (BURNER_ROLE).
- *   - Lock-gate: while userUnlockAt[holder] is in the future, user→user
- *     transfers revert (TransferLocked); after it elapses, transfers succeed.
- *   - Mint (deposit) and burn (redeem) are EXEMPT from the lock — the keeper can
- *     always issue and redeem, even while the holder is locked.
- *   - setLock is LOCKER_ROLE-only and MONOTONIC (cannot shorten an existing lock).
+ *   - SOULBOUND: user→user transfers ALWAYS revert (NonTransferable) — during the
+ *     lock-up AND after it elapses. There is no "becomes transferable" state.
+ *   - Mint (deposit) and burn (redeem) are always allowed — the keeper can issue
+ *     and redeem regardless of the transfer block.
+ *   - setLock is LOCKER_ROLE-only and MONOTONIC (redeem-maturity marker; cannot
+ *     shorten an existing value).
  *   - setLockBatch seeds many holders (used by the migration).
- *   - pause() blocks all movement; only PAUSER_ROLE toggles it.
+ *   - pause() blocks keeper mint/burn too; only PAUSER_ROLE toggles it.
  *   - rescueTokens is admin-only.
  */
 const assert = require("node:assert/strict");
@@ -30,7 +31,7 @@ async function now() {
 async function deploy() {
   const [admin, keeper, alice, bob, carol] = await ethers.getSigners();
   const SF = await ethers.getContractFactory("StakedFYUSD");
-  const sf = await SF.deploy("Staked FYUSD", "sFYUSD", 6, admin.address);
+  const sf = await SF.deploy("Vault FYUSD", "vFYUSD", 6, admin.address);
   await sf.waitForDeployment();
 
   // Grant the keeper the operational roles (as the deploy script will).
@@ -46,13 +47,13 @@ describe("StakedFYUSD", () => {
   it("has 6 decimals and the expected name/symbol", async () => {
     const { sf } = await deploy();
     assert.equal(await sf.decimals(), 6n);
-    assert.equal(await sf.symbol(), "sFYUSD");
-    assert.equal(await sf.name(), "Staked FYUSD");
+    assert.equal(await sf.symbol(), "vFYUSD");
+    assert.equal(await sf.name(), "Vault FYUSD");
   });
 
   it("only MINTER can mint and only BURNER can burnByKeeper", async () => {
     const { sf, keeper, alice } = await deploy();
-    await sf.connect(keeper).mint(alice.address, 1_000_000n); // 1.0 sFYUSD (6-dec)
+    await sf.connect(keeper).mint(alice.address, 1_000_000n); // 1.0 vFYUSD (6-dec)
     assert.equal(await sf.balanceOf(alice.address), 1_000_000n);
 
     await assert.rejects(sf.connect(alice).mint(alice.address, 1n)); // no role
@@ -62,30 +63,34 @@ describe("StakedFYUSD", () => {
     assert.equal(await sf.balanceOf(alice.address), 600_000n);
   });
 
-  it("blocks user transfers while locked, allows them once the lock elapses", async () => {
+  it("is soulbound — user transfers ALWAYS revert, even after the lock elapses", async () => {
     const { sf, keeper, alice, bob } = await deploy();
     await sf.connect(keeper).mint(alice.address, 1_000_000n);
 
     const unlock = (await now()) + 60 * DAY;
-    await sf.connect(keeper).setLock(alice.address, unlock);
+    await sf.connect(keeper).setLock(alice.address, unlock); // redeem maturity marker
     assert.equal(await sf.isTransferable(alice.address), false);
 
-    // user → user transfer reverts while locked
+    // user → user transfer reverts (soulbound)
     await assert.rejects(
       sf.connect(alice).transfer(bob.address, 100_000n),
-      (e) => /TransferLocked/.test(String(e)),
+      (e) => /NonTransferable/.test(String(e)),
     );
 
-    // ...but the keeper can still mint to and burn from a locked holder
-    await sf.connect(keeper).mint(alice.address, 500_000n); // deposit while locked
-    await sf.connect(keeper).burnByKeeper(alice.address, 200_000n); // redeem while locked
+    // the keeper can still mint to and burn from the holder
+    await sf.connect(keeper).mint(alice.address, 500_000n); // deposit
+    await sf.connect(keeper).burnByKeeper(alice.address, 200_000n); // redeem
     assert.equal(await sf.balanceOf(alice.address), 1_300_000n);
 
-    // after the lock elapses, transfers succeed
+    // AFTER the lock-up elapses it is STILL non-transferable (no "becomes
+    // transferable" state) — this is the key difference from the old sFYUSD.
     await warp(60 * DAY + 1);
-    assert.equal(await sf.isTransferable(alice.address), true);
-    await sf.connect(alice).transfer(bob.address, 300_000n);
-    assert.equal(await sf.balanceOf(bob.address), 300_000n);
+    assert.equal(await sf.isTransferable(alice.address), false);
+    await assert.rejects(
+      sf.connect(alice).transfer(bob.address, 300_000n),
+      (e) => /NonTransferable/.test(String(e)),
+    );
+    assert.equal(await sf.balanceOf(bob.address), 0n);
   });
 
   it("setLock is monotonic — cannot shorten an existing lock", async () => {
@@ -116,18 +121,18 @@ describe("StakedFYUSD", () => {
     await assert.rejects(sf.connect(keeper).setLockBatch([alice.address], [1, 2]));
   });
 
-  it("pause blocks all movement; only PAUSER can toggle", async () => {
-    const { sf, admin, keeper, alice, bob } = await deploy();
+  it("pause blocks keeper mint/burn; only PAUSER can toggle", async () => {
+    const { sf, admin, keeper, alice } = await deploy();
     await sf.connect(keeper).mint(alice.address, 1_000_000n);
 
     await assert.rejects(sf.connect(alice).pause()); // no role
     await sf.connect(keeper).pause();
-    await assert.rejects(sf.connect(alice).transfer(bob.address, 1n));
-    await assert.rejects(sf.connect(keeper).mint(alice.address, 1n)); // paused blocks mint too
+    await assert.rejects(sf.connect(keeper).mint(alice.address, 1n)); // paused blocks mint
+    await assert.rejects(sf.connect(keeper).burnByKeeper(alice.address, 1n)); // and burn
 
     await sf.connect(keeper).unpause();
-    await sf.connect(alice).transfer(bob.address, 1n);
-    assert.equal(await sf.balanceOf(bob.address), 1n);
+    await sf.connect(keeper).mint(alice.address, 1n); // keeper ops resume after unpause
+    assert.equal(await sf.balanceOf(alice.address), 1_000_001n);
 
     // admin also holds nothing special unless granted; DEFAULT_ADMIN can grant
     assert.equal(await sf.hasRole(await sf.DEFAULT_ADMIN_ROLE(), admin.address), true);

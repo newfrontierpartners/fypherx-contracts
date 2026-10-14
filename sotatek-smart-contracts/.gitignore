@@ -30,3 +30,7 @@ typechain-types
 # real signer addresses live here, separate per network.
 multisig-signers.*.json
 .env.hoodi-deployer
+
+# Migration snapshots hold customer wallet lists — never commit them.
+migration/holders.json
+migration/locks.json

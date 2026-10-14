@@ -7,28 +7,35 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
 /**
- * @title sFYUSD — Staked FYUSD Earn receipt (model A; renamed from vFYUSD)
+ * @title vFYUSD — non-transferable ("soulbound") FYUSD Earn receipt (model A)
  * @notice The single user-facing Earn receipt for the model-A (hybrid) money
- *         path. Mint/burn-controlled: only the backend keeper (MINTER_ROLE)
- *         issues it on an Earn deposit, and only the keeper (BURNER_ROLE) burns
- *         it on redeem. 6-dec to match FYUSD. This is a plain controlled ERC-20
- *         receipt — it does NOT custody assets and is NOT an ERC-4626 vault; the
- *         Concrete position is held by the Safe-governed custody, and per-user
- *         yield is tracked in the backend ledger (paid in FYUSD at redeem).
+ *         path. Deployed with name/symbol "vFYUSD". Mint/burn-controlled: only
+ *         the backend keeper (MINTER_ROLE) issues it on an Earn deposit, and only
+ *         the keeper (BURNER_ROLE) burns it on redeem. 6-dec to match FYUSD. This
+ *         is a plain controlled ERC-20 receipt — it does NOT custody assets and is
+ *         NOT an ERC-4626 vault; the Concrete position is held by the Safe-governed
+ *         custody, and per-user yield is tracked in the backend ledger.
  *
- *         Adds, vs the prior {VFyusd}:
- *           1. LOCK-GATED TRANSFERS — while a holder's lock-up is active the
- *              token is non-transferable between users; it becomes transferable
- *              once the lock elapses. Keeper mint (deposit) and burn (redeem)
- *              are always allowed, so the lock never blocks issuance/redemption.
- *              Locks are per-ADDRESS (the holder's longest active lock) and
- *              MONOTONIC — they can only be extended, never shortened, so a
- *              relayer can never cut a user's lock-up early.
- *           2. MANAGEMENT — pause/unpause (PAUSER_ROLE) and rescueTokens
+ *         Semantics (2026-07 revision — reverted from the transferable "sFYUSD"
+ *         design back to a non-transferable vFYUSD):
+ *           1. SOULBOUND — the receipt can NEVER be transferred between users, and
+ *              users can never deposit it into another contract. The ONLY movements
+ *              are the keeper's mint (from == 0, on deposit) and burn (to == 0, on
+ *              redeem). This holds even after the lock-up elapses — there is no
+ *              "becomes transferable" state anymore.
+ *           2. LOCK-UP retained as REDEEM MATURITY — {userUnlockAt} still records
+ *              the holder's 60/90/120-day unlock and is monotonic (only extended,
+ *              never shortened). It is NOT used to gate transfers (those are always
+ *              blocked); it is read off-chain by the backend to gate REDEMPTION —
+ *              a holder can only redeem once their maturity has elapsed.
+ *           3. MANAGEMENT — pause/unpause (PAUSER_ROLE) and rescueTokens
  *              (DEFAULT_ADMIN_ROLE) for ops/safety.
  *
  *         DEFAULT_ADMIN_ROLE (deployer → transferred to the Operator Safe)
  *         curates the MINTER/BURNER/PAUSER/LOCKER roles.
+ *
+ *         (Solidity contract name kept as {StakedFYUSD} to avoid churn in the
+ *          deploy/migrate scripts + Web3j bindings; the on-chain symbol is vFYUSD.)
  */
 contract StakedFYUSD is ERC20, ERC20Pausable, AccessControl {
     using SafeERC20 for IERC20;
@@ -41,19 +48,22 @@ contract StakedFYUSD is ERC20, ERC20Pausable, AccessControl {
 
     uint8 private immutable _decimalsValue;
 
-    /// @notice Per-address unlock timestamp. While `block.timestamp < userUnlockAt[a]`
-    ///         the holder `a` cannot transfer (mint by the keeper and burn on
-    ///         redeem are exempt). 0 = never locked. Monotonic — only extended.
+    /// @notice Per-address REDEEM-maturity timestamp. The holder can only redeem
+    ///         once `block.timestamp >= userUnlockAt[a]` (enforced off-chain by the
+    ///         backend). 0 = no maturity set. Monotonic — only extended. NOTE: this
+    ///         does NOT control transfers — the receipt is soulbound, so transfers
+    ///         are always blocked regardless of this value.
     mapping(address => uint64) public userUnlockAt;
 
     event LockSet(address indexed user, uint64 unlockAt);
 
-    error TransferLocked(address from, uint64 unlockAt);
+    /// @notice The receipt is soulbound — user→user transfers are never allowed.
+    error NonTransferable();
     error LengthMismatch();
 
     /**
-     * @param name_     e.g. "Staked FYUSD"
-     * @param symbol_   e.g. "sFYUSD"
+     * @param name_     e.g. "Vault FYUSD"
+     * @param symbol_   e.g. "vFYUSD"
      * @param decimals_ 6 (match FYUSD)
      * @param admin     DEFAULT_ADMIN_ROLE holder (deployer; transfer to Safe later)
      */
@@ -71,22 +81,24 @@ contract StakedFYUSD is ERC20, ERC20Pausable, AccessControl {
 
     // ── keeper mint / burn ──────────────────────────────────────────────
 
-    /// @notice Keeper issues sFYUSD on an Earn deposit.
+    /// @notice Keeper issues vFYUSD on an Earn deposit.
     function mint(address to, uint256 amount) external onlyRole(MINTER_ROLE) {
         _mint(to, amount);
     }
 
-    /// @notice Keeper burns sFYUSD on redeem (no allowance needed). Allowed even
-    ///         while the holder is locked — redemption is gated by the backend,
-    ///         not by the transfer lock.
+    /// @notice Keeper burns vFYUSD on redeem (no allowance needed). The soulbound
+    ///         transfer block does not apply to burns (to == 0), so the keeper can
+    ///         always redeem; redemption timing is gated off-chain by the backend
+    ///         against {userUnlockAt} (the redeem maturity).
     function burnByKeeper(address from, uint256 amount) external onlyRole(BURNER_ROLE) {
         _burn(from, amount);
     }
 
     // ── lock-up ─────────────────────────────────────────────────────────
 
-    /// @notice Record/extend a holder's lock-up (monotonic: never shortens).
-    ///         Called by the backend at deposit time with `depositTime + tenure`.
+    /// @notice Record/extend a holder's redeem maturity (monotonic: never shortens).
+    ///         Called by the backend at deposit time with `depositTime + tenure`
+    ///         (60/90/120 days). Gates redemption off-chain — not transfers.
     function setLock(address user, uint64 unlock) external onlyRole(LOCKER_ROLE) {
         _setLock(user, unlock);
     }
@@ -110,10 +122,11 @@ contract StakedFYUSD is ERC20, ERC20Pausable, AccessControl {
         }
     }
 
-    /// @notice True if `user` can transfer right now (lock elapsed or unset).
-    function isTransferable(address user) external view returns (bool) {
-        uint64 u = userUnlockAt[user];
-        return u == 0 || block.timestamp >= u;
+    /// @notice Soulbound receipt — holders can never transfer, so this is always
+    ///         false. Kept for ABI/back-compat with earlier readers. Use
+    ///         {userUnlockAt} to check a holder's REDEEM maturity instead.
+    function isTransferable(address) external pure returns (bool) {
+        return false;
     }
 
     // ── management ──────────────────────────────────────────────────────
@@ -142,12 +155,12 @@ contract StakedFYUSD is ERC20, ERC20Pausable, AccessControl {
         internal
         override(ERC20, ERC20Pausable)
     {
-        // Lock-gate user→user transfers. Mint (from == 0) and burn (to == 0) —
-        // the keeper's deposit/redeem ops — are exempt, so the lock can never
-        // block issuance or redemption.
+        // Soulbound: block ALL user→user movement, permanently and regardless of
+        // the lock-up. Only the keeper's mint (from == 0, deposit) and burn
+        // (to == 0, redeem) are allowed — a holder can never transfer the receipt
+        // or deposit it into another contract, even after the lock-up elapses.
         if (from != address(0) && to != address(0)) {
-            uint64 u = userUnlockAt[from];
-            if (u != 0 && block.timestamp < u) revert TransferLocked(from, u);
+            revert NonTransferable();
         }
         super._update(from, to, value);
     }
