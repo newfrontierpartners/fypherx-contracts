@@ -2,9 +2,13 @@ const { ethers } = require("ethers");
 const ADDRESSES = require("./deployed-addresses.json");
 
 const RPC = "https://data-seed-prebsc-1-s1.binance.org:8545";
-// This key derives to 0x31B60b11533c97b5ED7b1B650D31855F3754Acb4
-// which is the contract owner & backendSigner for the deployed contracts.
-const PRIVATE_KEY = "0x92103c1eac100bc3d718c8948c0edfa432c0fab48f9694a97139737d6e926e82";
+// Owner / backendSigner key for the deployed testnet contracts. Never commit a
+// key here (this repository is public); supply it through the environment.
+const PRIVATE_KEY = process.env.SETUP_PRIVATE_KEY;
+if (!PRIVATE_KEY) {
+  console.error("SETUP_PRIVATE_KEY is not set");
+  process.exit(1);
+}
 
 const MINTING_ABI = [
   "function addSupportedAsset(address asset) external",
